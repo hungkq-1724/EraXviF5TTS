@@ -127,11 +127,10 @@ print("\nAll done! Check your output folder.")
 * **What's Next?** 🤔
 The EraX Team (that's us!) are always tinkering and trying to make things better (or at least, less broken!).
 We hope to bring more updates your way. Let us know what you think – feedback, bug reports, or even just saying hi is always welcome!
-```
 - [ ] ⭐ Release checkpoints for Vietnamese male
 - [ ] 📝 Codes for real-time TTS streaming
 - [ ] 🔥 Release Piper-based model that can run on ...Rasberry Pi 4 🔥
-```
+
 ⚠️ **Important Note on Responsible Use** ⚠️
 - Voice cloning technology is powerful and comes with significant ethical responsibilities.
 - Intended Use: This model is intended for creative purposes, accessibility tools, personal projects, and applications where consent is explicit and ethical considerations are prioritized.
