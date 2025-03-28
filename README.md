@@ -14,7 +14,8 @@ We gave it a nudge towards Vietnamese TTS, and sprinkled in some voice cloning c
 Okay, moment of truth. Here's a sample voice we fed into the model (the "reference"):
 
 *   **Reference Audio & Text:**
-    <audio controls src="https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/update_213000_ref.wav"></audio>
+    [Click to play](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/update_213000_ref.wav)
+    
     > *"Thậm chí không ăn thì cũng có cảm giác rất là cứng bụng, chủ yếu là cái phần rốn...trở lên. Em có cảm giác khó thở, và ngủ cũng không ngon, thường bị ợ hơi rất là nhiều"*
 
 And here's our model trying its best to mimic that voice while reading completely different text. Fingers crossed! 🤞
@@ -23,7 +24,7 @@ And here's our model trying its best to mimic that voice while reading completel
     > *"Trong khi đó, tại một chung cư trên địa bàn P.Vĩnh Tuy (Q.Hoàng Mai), nhiều người sống trên tầng cao giật mình khi thấy rung lắc mạnh nên đã chạy xuống sảnh tầng 1. Cư dân tại đây cho biết, họ chưa bao giờ cảm thấy ảnh hưởng của động đất mạnh như hôm nay"*
 
 *   **Generated Audio:**
-    <audio controls src="https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_non_ema.wav"></audio>
+    [Click to play](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_non_ema.wav)
 
 ## Wanna try this magic (or madness) yourself? 🧙‍♂️
 
