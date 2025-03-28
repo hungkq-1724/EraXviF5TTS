@@ -142,6 +142,19 @@ We hope to bring more updates your way. Let us know what you think – feedback,
 
   Please use this technology thoughtfully and ethically.
 
+⚠️ **Lưu ý Quan trọng về Việc Sử dụng có Trách nhiệm** ⚠️
+
+- Sức mạnh và Trách nhiệm: Công nghệ nhân bản giọng nói sở hữu sức mạnh to lớn và đi kèm với những trách nhiệm đạo đức hết sức quan trọng.
+- Mục đích Sử dụng Dự kiến: Mô hình này được tạo ra nhằm phục vụ các mục đích sáng tạo, phát triển công cụ hỗ trợ tiếp cận, thực hiện dự án cá nhân và các ứng dụng khác nơi có sự đồng thuận rõ ràng từ các bên liên quan và các yếu tố đạo đức luôn được đặt lên hàng đầu.
+- Nghiêm cấm Sử dụng Sai trái: Chúng tôi cực lực lên án và nghiêm cấm tuyệt đối việc sử dụng mô hình này cho bất kỳ mục đích xấu xa, phi đạo đức nào, bao gồm nhưng không giới hạn ở:
+  - Tạo ra deepfake hoặc mạo danh người khác khi chưa được sự cho phép hoặc đồng thuận rõ ràng.
+  - Phát tán thông tin sai lệch, tạo nội dung lừa đảo hoặc các tài liệu mang tính phỉ báng, bôi nhọ.
+  - Thực hiện hành vi quấy rối, lạm dụng hoặc bất kỳ hoạt động tội phạm nào khác.
+
+- Trách nhiệm của Người dùng: Khi sử dụng mô hình này, bạn cam kết hành động một cách có trách nhiệm và tuân thủ các chuẩn mực đạo đức. Bạn phải chịu trách nhiệm hoàn toàn về nội dung do mình tạo ra và đảm bảo rằng nội dung đó tuân thủ mọi quy định pháp luật hiện hành và các tiêu chuẩn đạo đức. Đội ngũ phát triển (Nhóm EraX) hoàn toàn không chịu trách nhiệm cho bất kỳ hành vi lạm dụng nào đối với mô hình này.
+
+  Lời kêu gọi: Xin hãy sử dụng công nghệ này một cách có suy xét, thận trọng và đạo đức.
+
 **License Stuff** 📜
 We're keeping it simple with the MIT License, following in the footsteps of giants like Whisper. Use it, break it, hopefully make cool things with it!
 
