@@ -46,6 +46,9 @@ Alternatively, you can visit our [Hugging Face model page](https://huggingface.c
 Getting started is hopefully not *too* painful. After downloading this repo and cloning our GitHub, you can try something like this:
 
 ```python
+# Ubuntu: sudo apt install ffmpeg
+# Windows please refer to manual to install  "ffmpeg" too
+
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] =  "0" # Tell it which GPU to use (or ignore if you're CPU-bound and patient!)
 
