@@ -6,7 +6,7 @@
 
 Hey there, fellow Vietnamese AI explorers! 👋
 
-We took the rather clever F5-TTS model, with ++800,000 samples from public repository and from a huge 500h private dataset whom was kindly giving us a right to use it. 
+We took the rather clever [F5-TTS model](https://arxiv.org/abs/2410.06885), with ++800,000 samples from public repository and from a huge 500h private dataset whom was kindly giving us a right to use it. 
 We gave it a nudge towards Vietnamese TTS, and sprinkled in some voice cloning capabilities because... well, why not? We're calling this little experiment **EraX-Smile-Female-F5-V1.0**. We hope it brings a smile (or at least doesn't make you frown *too* much).
 
 ## Does it actually work? Let's listen! 🎧
