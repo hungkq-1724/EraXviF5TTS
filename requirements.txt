@@ -1,3 +1,6 @@
-pip install vinorm
-pip install f5-tts
-pip install librosa
+numpy==1.24
+matplotlib
+vinorm
+f5-tts
+librosa
+# jupyter
