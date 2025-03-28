@@ -47,7 +47,7 @@ Getting started is hopefully not *too* painful. After downloading this repo and 
 
 ```python
 # Ubuntu: sudo apt install ffmpeg
-# Windows please refer [Install ffmpeg for Windows](https://www.geeksforgeeks.org/how-to-install-ffmpeg-on-windows/)
+# Windows please refer to https://www.geeksforgeeks.org/how-to-install-ffmpeg-on-windows/
 
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] =  "0" # Tell it which GPU to use (or ignore if you're CPU-bound and patient!)
