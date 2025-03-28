@@ -6,8 +6,11 @@
 
 Hey there, fellow Vietnamese AI explorers! 👋
 
-We took the rather clever [F5-TTS model](https://arxiv.org/abs/2410.06885), with ++800,000 samples from public repository and from a huge 500h private dataset whom was kindly giving us a right to use it. 
-We gave it a nudge towards Vietnamese TTS, and sprinkled in some voice cloning capabilities because... well, why not? We're calling this little experiment **EraX-Smile-Female-F5-V1.0**. We hope it brings a smile (or at least doesn't make you frown *too* much).
+We introduce **EraX-Smile-Female-F5-V1.0**, a Vietnamese text-to-speech model developed based on the F5-TTS architecture [arXiv:2410.06885](https://arxiv.org/abs/2410.06885).
+To adapt this model for Vietnamese, we utilized a substantial dataset combining over 800,000 samples, of which some are from public repositories and with an extensive 500-hour private dataset, for which we gratefully acknowledge obtaining usage rights. 
+The model underwent significant training, involving approximately 1 million update steps on a 4x RTX 3090 configuration. It tooks almost a week with some crashes and burns too 🔥
+
+Our hope is that EraX-Smile-Female-F5-V1.0 (soon UniSex) proves to be a useful contribution to the community for ethical and creative purposes.
 
 ## Does it actually work? Let's listen! 🎧
 
