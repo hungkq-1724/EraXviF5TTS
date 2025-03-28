@@ -126,7 +126,8 @@ print("\nAll done! Check your output folder.")
 
 * For full Web interface and control with Gradio, please clone and use the original repository of [F5-TTS Github](https://github.com/SWivid/F5-TTS)
 * We use the cool library from [Vnorm Team](https://github.com/v-nhandt21/Vinorm) for Vietnamese text normalization.
-  
+* Don't forget to like, share and star us on Github and HuggingFace!
+
 ```bibtex
 @misc{EraXSmileF5_2024,
   author       = {Nguyễn Anh Nguyên and The EraX Team},
