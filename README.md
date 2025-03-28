@@ -122,7 +122,7 @@ for i, sentence in enumerate(sentences):
 print("\nAll done! Check your output folder.")
 ```
 * For full Web interface and control with Gradio, please clone and use the original repository of [F5-TTS Github](https://github.com/SWivid/F5-TTS)
-* We use the cool library from [Vnorm Team](https://github.com/v-nhandt21/Vinorm) for Vietnamese text normalization.
+* We use the cool library from [Vinorm Team](https://github.com/v-nhandt21/Vinorm) for Vietnamese text normalization.
 
 * **What's Next?** 🤔
 The EraX Team (that's us!) are always tinkering and trying to make things better (or at least, less broken!).
