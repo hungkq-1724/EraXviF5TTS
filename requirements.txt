@@ -1,0 +1,3 @@
+pip install vinorm
+pip install f5-tts
+pip install librosa
