@@ -40,8 +40,6 @@ Alternatively, you can visit our [Hugging Face model page](https://huggingface.c
 
 ## Wanna try this magic (or madness) yourself? 🧙‍♂️
 
-The code that wrangles this thing lives over on our GitHub: ([EraX Smile Github](https://github.com/EraX-JS-Company/EraX-Smile-F5TTS)). Give it a visit!
-
 Getting started is hopefully not *too* painful. After downloading this repo and cloning our GitHub, you can try something like this:
 
 ```python
