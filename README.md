@@ -16,7 +16,7 @@ Okay, moment of truth. Here's a sample voice we fed into the model (the "referen
 # EraX-Smile-Female-F5-V1.0
 
 ## Reference Audio & Text
-**Reference Audio:** [Download and play reference audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/update_213000_ref.wav)
+**Reference Audio:** [Download and play reference audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/update_213000_ref.wav)
 
 **Reference Text:**
 > *"Thậm chí không ăn thì cũng có cảm giác rất là cứng bụng, chủ yếu là cái phần rốn...trở lên. Em có cảm giác khó thở, và ngủ cũng không ngon, thường bị ợ hơi rất là nhiều"*
@@ -26,7 +26,7 @@ And here's our model trying its best to mimic that voice while reading completel
 ## Text to Generate
 > *"Trong khi đó, tại một chung cư trên địa bàn P.Vĩnh Tuy (Q.Hoàng Mai), nhiều người sống trên tầng cao giật mình khi thấy rung lắc mạnh nên đã chạy xuống sảnh tầng 1. Cư dân tại đây cho biết, họ chưa bao giờ cảm thấy ảnh hưởng của động đất mạnh như hôm nay"*
 
-**Generated Audio:** [Download and play generated audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_non_ema.wav)
+**Generated Audio:** [Download and play generated audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/generated_non_ema.wav)
 
 ## Audio Samples
 
