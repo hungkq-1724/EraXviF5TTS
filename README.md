@@ -82,7 +82,7 @@ tts = F5TTSWrapper(
     vocoder_name="vocos", # Using Vocos vocoder
     ckpt_path=eraX_ckpt_path,
     vocab_file=vocab_file,
-    use_ema=False, # Set True if you trained *with* EMA and want to use those weights
+    use_ema=False, # ALWAYS False as we converted from .pt to safetensors and EMA (where there is or not) was in there
 )
 
 # Normalize the reference text (makes it easier for the model)
