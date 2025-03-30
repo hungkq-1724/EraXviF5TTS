@@ -18,7 +18,7 @@ Okay, moment of truth. Here's a sample voice we fed into the model (the "referen
 
 # EraX-Smile-Female-F5-V1.0
 
-## Reference Audio & Text
+## Reference Audio (< 15s) & Text
 **Reference Audio:** [Download and play reference audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/update_213000_ref.wav)
 
 **Reference Text:**
