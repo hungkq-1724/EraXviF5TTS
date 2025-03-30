@@ -29,7 +29,10 @@ And here's our model trying its best to mimic that voice while reading completel
 ## Text to Generate
 > *"Trong khi đó, tại một chung cư trên địa bàn P.Vĩnh Tuy (Q.Hoàng Mai), nhiều người sống trên tầng cao giật mình khi thấy rung lắc mạnh nên đã chạy xuống sảnh tầng 1. Cư dân tại đây cho biết, họ chưa bao giờ cảm thấy ảnh hưởng của động đất mạnh như hôm nay"*
 
-**Generated Audio:** [Download and play generated audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/generated_non_ema_345000.wav)
+**Generated Audio:** [Download and play generated audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/generated_429000.wav)
+
+## Attention: 
+Just a gentle observation regarding the selected reference audio – it seems there might be a **noticeable pause** within it. Please be aware that the zero-shot cloning process will likely replicate this characteristic in the synthesized output. If a more continuous flow without pauses is desired, you might consider using a reference recording that is clean and free of significant delays, unless reproducing the pause is intentional.
 
 ## Audio Samples
 
@@ -37,7 +40,7 @@ If you'd like to listen to the audio samples directly:
 
 1. **Reference Audio**: Download the [reference audio file](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/update_213000_ref.wav) and play it on your device.
 
-2. **Generated Audio**: Download the [generated audio file](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_non_ema_345000.wav) and play it on your device.
+2. **Generated Audio**: Download the [generated audio file](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_429000.wav) and play it on your device.
 
 Alternatively, you can visit our [Hugging Face model page](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0) to access and play these audio files directly.
 
