@@ -2,6 +2,11 @@
   <img src="https://cdn-uploads.huggingface.co/production/uploads/63d8d8879dfcfa941d4d7cd9/GsQKdaTyn2FFx_cZvVHk3.png" alt="Logo">
 </p>
 
+# UPDATE:
+
+## EraX-Smile-UnixSex-F5: Unisex is now available at https://huggingface.co/erax-ai/EraX-Smile-UnixSex-F5 ✨✨✨
+
+---------------
 # EraX-Smile-Female-F5-V1.0: Giving F5-TTS a Vietnamese Twist (with Online Zero-Shot Voice Cloning!) ✨
 
 Hey there, fellow Vietnamese AI explorers! 👋
