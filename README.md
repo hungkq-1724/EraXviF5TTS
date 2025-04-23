@@ -4,7 +4,7 @@
 
 # UPDATE:
 
-## Celebrating the 50th Anniversary of Reunification Day (April 30, 1975 - April 30, 2025): Highly enhanced source codes are released (/src) ✨✨✨
+## Celebrating the 50th Anniversary of Reunification Day (April 30, 1975 - April 30, 2025): Highly enhanced source codes are released [(here)](https://github.com/EraX-AI/viF5TTS/tree/main/src) ✨✨✨
 
 ## EraX-Smile-UnixSex-F5: Unisex is now available at https://huggingface.co/erax-ai/EraX-Smile-UnixSex-F5 ✨✨✨
 
