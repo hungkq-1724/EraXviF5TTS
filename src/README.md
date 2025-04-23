@@ -4,6 +4,8 @@
 
 # Introduce an Highly Enhanced F5-TTS fully open source.
 
+**MIT license** for everything except if you use the **pretrained F5-TTS model**, then you are bound with Emilia dataset which is under **BY-NC 4.0 license**. 
+
 **Celebrating the 50th Anniversary of Reunification Day (April 30, 1975 - April 30, 2025) 🇻🇳 🇻🇳 🇻🇳** 
 
 This repository is a significantly enhanced fork of the original F5-TTS project. We have introduced several major improvements and features, focusing on model efficiency, training stability, and output quality. Key additions include advanced pruning techniques, a sophisticated duration predictor, improved checkpointing, knowledge distillation capabilities, and the option to train models entirely from scratch.
