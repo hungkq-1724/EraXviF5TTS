@@ -21,7 +21,7 @@ Optimize your model size and inference speed using our flexible pruning options.
       --model_path "/path/to/your/base_model.safetensors" \
       --output_dir "/path/to/your/pruned_models" \
       --output_name "pruned_model_16_layers_auto.pt" \
-      --layers_keep 16 # Keep 16 blocks, selected evenly
+      --target_layers 16 # Keep 16 blocks, selected evenly
     ```
 
 *   **Manual Block Selection:**
