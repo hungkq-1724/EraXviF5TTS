@@ -763,14 +763,39 @@ def main():
     else:
         accelerator.print("Duration predictor found in student model.")
         
-    # --- Define Optimizer (Raw) ---
+    # --- Define Optimizer with Parameter Groups (Raw) ---
     optimizer_cls = AdamW
     if args.bnb_optimizer:
         try: import bitsandbytes as bnb; optimizer_cls = bnb.optim.AdamW8bit; accelerator.print("Using BNB 8-bit AdamW.")
         except ImportError: accelerator.print("[Warning] bitsandbytes not found. Falling back to AdamW.")
-    optimizer = optimizer_cls(student_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay, betas=(0.9, 0.98), eps=1e-8)
-    if optimizer_cls is AdamW: accelerator.print("Using standard AdamW.")
-
+    
+    # Create separate parameter groups for duration predictor and the rest of the model
+    if hasattr(student_model, 'duration_predictor') and student_model.duration_predictor is not None:
+        # Get duration predictor parameters
+        duration_params = list(student_model.duration_predictor.parameters())
+        
+        # Get all other parameters from the model
+        other_params = [p for p in student_model.parameters() 
+                       if not any(p is dp for dp in duration_params)]
+        
+        accelerator.print(f"Duration predictor params: {len(duration_params)}, Other params: {len(other_params)}")
+        
+        # Create parameter groups with different hyperparameters
+        param_groups = [
+            {'params': duration_params, 'lr': args.learning_rate * 3, 'weight_decay': 0.0003},
+            {'params': other_params, 'lr': args.learning_rate, 'weight_decay': args.weight_decay}
+        ]
+        optimizer = optimizer_cls(
+            param_groups, 
+            betas=(0.9, 0.98),
+            eps=1e-8
+        )
+        accelerator.print(f"Using optimizer with parameter groups - Duration predictor LR: {args.learning_rate * 3}, Others LR: {args.learning_rate}")
+    else:
+        # If no duration predictor, use all parameters with same settings
+        optimizer = optimizer_cls(student_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay, betas=(0.9, 0.98), eps=1e-8)
+        if optimizer_cls is AdamW: accelerator.print("Using standard AdamW.")
+            
     # --- Define Dataset and Calculate Scheduler Steps ---
     accelerator.print(f"Loading dataset '{args.dataset_name}'...")
     try: train_dataset = load_dataset(args.dataset_name, args.tokenizer, mel_spec_kwargs=mel_spec_kwargs); accelerator.print(f"Dataset loaded. Size: {len(train_dataset)}")

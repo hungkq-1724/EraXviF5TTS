@@ -144,17 +144,47 @@ class Trainer:
             setattr(self.model, 'duration_predictor', self.duration_predictor)
             total_params = sum(p.numel() for p in self.duration_predictor.parameters() if p.requires_grad)
             print(f"Total number of trainable parameters in Duration Predictor: {total_params}")
-
+        
+        # Create separate parameter groups for duration predictor and the rest of the model
+        if self.duration_predictor is not None:
+            # Get duration predictor parameters
+            duration_params = list(self.duration_predictor.parameters())
+            
+            # Get all other parameters from the model
+            other_params = [p for p in self.model.parameters() 
+                          if not any(p is dp for dp in duration_params)]
+            
+            print(f"Duration predictor params: {len(duration_params)}, Other params: {len(other_params)}")
+            
+            # Create parameter groups with different hyperparameters
+            param_groups = [
+                {'params': duration_params, 'lr': learning_rate * 2, 'weight_decay': 0.0003},
+                {'params': other_params, 'lr': learning_rate, 'weight_decay': weight_decay}
+            ]
+        else:
+            # If no duration predictor, use all parameters with same settings
+            param_groups = self.model.parameters()
+        
+        # Create optimizer with parameter groups
         if bnb_optimizer:
             import bitsandbytes as bnb
-
-            self.optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=learning_rate, weight_decay=weight_decay, 
-                                                 betas=(0.9, 0.98),
-                                                 eps=1e-8)
+            self.optimizer = bnb.optim.AdamW8bit(
+                param_groups, 
+                lr=learning_rate,  # Base learning rate (will be overridden by parameter groups)
+                weight_decay=weight_decay,  # Base weight decay (will be overridden by parameter groups) 
+                betas=(0.9, 0.98),
+                eps=1e-8
+            )
         else:
-            self.optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, 
-                                   betas=(0.9, 0.98),
-                                   eps=1e-8)
+            self.optimizer = AdamW(
+                param_groups, 
+                lr=learning_rate,  # Base learning rate (will be overridden by parameter groups)
+                weight_decay=weight_decay,  # Base weight decay (will be overridden by parameter groups)
+                betas=(0.9, 0.98),
+                eps=1e-8
+            )
+            
+            
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
 
         # Store reference sample information
