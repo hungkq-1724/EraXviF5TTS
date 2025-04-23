@@ -1,7 +1,3 @@
-Okay, here is a professional English translation suitable for a GitHub README, incorporating the technical details and explanations you provided.
-
----
-
 ## Enhanced F5-TTS Fork
 
 This repository is a significantly enhanced fork of the original F5-TTS project. We have introduced several major improvements and features, focusing on model efficiency, training stability, and output quality. Key additions include advanced pruning techniques, a sophisticated duration predictor, improved checkpointing, knowledge distillation capabilities, and the option to train models entirely from scratch.
