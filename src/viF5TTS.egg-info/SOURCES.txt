@@ -118,6 +118,12 @@ src/model_pruning/inspect_pt.py
 src/model_pruning/pt_to_safetensor.py
 src/model_pruning/reset_f5tts_epoch_enhanced.py
 src/model_pruning/.ipynb_checkpoints/reset_f5tts_epoch_enhanced-checkpoint.py
+src/viF5TTS.egg-info/PKG-INFO
+src/viF5TTS.egg-info/SOURCES.txt
+src/viF5TTS.egg-info/dependency_links.txt
+src/viF5TTS.egg-info/entry_points.txt
+src/viF5TTS.egg-info/requires.txt
+src/viF5TTS.egg-info/top_level.txt
 src/viTTS.egg-info/PKG-INFO
 src/viTTS.egg-info/SOURCES.txt
 src/viTTS.egg-info/dependency_links.txt
