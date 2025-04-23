@@ -18,8 +18,8 @@ optim:
   bnb_optimizer: False  # use bnb 8bit AdamW optimizer or not
 
 model:
-  name: F5TTS_v1_Custom_Pruned_14  # model name updated to indicate pruned version with 4 layers
-  tokenizer: pinyin  # tokenizer type
+  name: F5TTS_v1_Custom_Pruned_12  # model name updated to indicate pruned version with 4 layers
+  tokenizer: char  # tokenizer type
   tokenizer_path: null  # if 'custom' tokenizer, define the path want to use (should be vocab.txt)
   backbone: DiT
   arch:
