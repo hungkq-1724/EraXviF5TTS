@@ -1,0 +1,6 @@
+numpy==1.24
+matplotlib
+vinorm
+f5-tts
+librosa
+# jupyter
