@@ -1,4 +1,4 @@
-## Enhanced F5-TTS Fork
+# Introduce an Highly Enhanced F5-TTS
 
 This repository is a significantly enhanced fork of the original F5-TTS project. We have introduced several major improvements and features, focusing on model efficiency, training stability, and output quality. Key additions include advanced pruning techniques, a sophisticated duration predictor, improved checkpointing, knowledge distillation capabilities, and the option to train models entirely from scratch.
 
@@ -43,7 +43,7 @@ We have integrated a **Duration Predictor** module into the F5-TTS architecture.
 
 The duration predictor adds a secondary loss component during training, controlled by `--duration_loss_weight`.
 
-*   **Finetuning an Existing Model (with Duration Predictor):**
+*   **Finetuning an Existing Model (with 🇻🇳 Duration Predictor 🇻🇳):**
     Adapt a pre-trained (potentially pruned) model using your custom dataset.
     ```bash
     accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
@@ -64,7 +64,7 @@ The duration predictor adds a secondary loss component during training, controll
       --ref_sample_text_prompts "Example prompt text for generating samples during training."
     ```
 
-*   **Training From Scratch (with Duration Predictor):**
+*   **Training From Scratch (with 🇻🇳 Duration Predictor 🇻🇳):**
     Train a new model entirely from your dataset.
     ```bash
     accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
@@ -85,6 +85,41 @@ The duration predictor adds a secondary loss component during training, controll
       --ref_sample_text_prompts "Example prompt text for generating samples during training."
     ```
 
+### ✨ Sophisticated 🇻🇳 Distillation 🇻🇳 w/ Duration Predictor ✨
+```
+accelerate launch --mixed_precision=bf16 /root/18April/F5-TTS/src/f5_tts/train/distil_reload.py \
+--teacher_ckpt_path /root/18April/Model_Pruning/full_finetune_ckpt/models/model_42000.safetensors \ <--- teacher model 
+--student_exp_name F5TTS_v1_Custom_Prune_12 \
+--student_init_ckpt_path /root/18April/F5-TTS/ckpts/steve_combined_multi/model_last.pt \ <-- student model (prune or origin)
+--dataset_name steve_combined_multi \
+--output_dir /root/18April/F5-TTS/ckpts/steve_combined_multi \
+--distill_loss_weight 0.5 \
+--distill_loss_type mse \
+--use_duration_predictor \
+--duration_loss_weight 0.25 \
+--learning_rate 2e-5 \
+--weight_decay 0.01 \
+--batch_size_per_gpu 16384 \
+--batch_size_type frame \
+--max_samples 128 \
+--grad_accumulation_steps 1 \
+--max_grad_norm 1.0 \
+--epochs 200 \
+--num_warmup_updates 20000 \
+--save_per_updates 2000 \
+--last_per_updates 2000 \
+--keep_last_n_checkpoints 50 \
+--log_samples \
+--logger tensorboard \
+--logging_dir /root/18April/F5-TTS/ckpts/steve_combined_multi/runs \
+--use_ema \
+--ema_decay 0.9999 \
+--tokenizer char \
+--tokenizer_path /root/18April/F5-TTS/data/steve_combined_multi_char/vocab.txt \
+--ref_audio_paths "/root/18April/Model_Pruning/female-vts.wav" \
+--ref_texts "ai đã đến hàng dương , đều không thể cầm lòng về những nấm mộ chen nhau , nhấp nhô trải khắp một vùng đồi . những nấm mộ có tên và không tên , nhưng nấm mộ lấp ló trong lùm cây , bụi cỏ ." \
+--ref_sample_text_prompts "sáng mười tám tháng bốn , cơ quan chức năng quảng ninh cho biết hiện cơ quan cảnh sát điều tra công an tỉnh quảng ninh đang tiếp tục truy bắt bùi đình khánh , ba mươi mốt tuổi , tay buôn ma túy đã xả súng làm một chiến sĩ công an hi sinh ."
+```
 ### Other Enhancements
 
 Beyond pruning and the duration predictor, this fork includes:
