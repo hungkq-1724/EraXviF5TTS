@@ -9,7 +9,7 @@
 pip install fastapi uvicorn piper-tts langchain underthesea vinorm
 python f5tts-fastapi-server.py <-- check port inside this file
 ```
-From borwser call the host/port and you are up and running.
+From browser call the host/port and you are up and running.
 
 ## Celebrating the 50th Anniversary of Reunification Day (April 30, 1975 - April 30, 2025): Highly enhanced source codes are released [(here)](https://github.com/EraX-AI/viF5TTS/tree/main/src) ✨✨✨
 

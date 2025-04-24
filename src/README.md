@@ -133,7 +133,7 @@ accelerate launch --mixed_precision=bf16 /root/18April/F5-TTS/src/f5_tts/train/d
 pip install fastapi uvicorn piper-tts langchain underthesea vinorm
 python f5tts-fastapi-server.py <-- check port inside this file
 ```
-From borwser call the host/port and you are up and running.
+From browser call the host/port and you are up and running.
 
 ### Other Enhancements
 
