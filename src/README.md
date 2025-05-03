@@ -10,6 +10,49 @@
 
 This repository is a significantly enhanced fork of the original F5-TTS project. We have introduced several major improvements and features, focusing on model efficiency, training stability, and output quality. Key additions include advanced pruning techniques, a sophisticated duration predictor, improved checkpointing, knowledge distillation capabilities, and the option to train models entirely from scratch.
 
+### We complete change the training strategy, with duration predictor but with phonemes, not text tokens which generated suboptimal quality
+*  First, we have to use phonemizer library with espeak "vi" (or whatever language you use) to convert text into phonemes and save into a single jsonl file named "phonemes_metadata.jsonl"
+Use "preprocess_phoneme.py" inside src/f5_tts/model" to convert. Change your path of "metadata.csv" and "phonemes_metadata.jsonl" accordingly so that later F5-TTS "prepare data" function (use Gradio) can use it automatically instead of use the metadata.csv for preparaing the raw.arrow and the duration.json
+
+Install the requirement for phonemizer but NOT the standard pip package. See below
+(Refer to `https://pypi.org/project/phonemizer/3.0.1`)
+
+```
+sudo apt-get install festival espeak-ng mbrola
+```
+
+Also, do NOT use the standard phonemizer repo as it is buggy and extremly slow, use a fixed forked repo at [https://github.com/bootphon/phonemizer.git](https://github.com/thewh1teagle/phonemizer-fork.git) instead, which is hundred times faster and fixed the caching bug.
+
+```bash
+git clone https://github.com/thewh1teagle/phonemizer-fork.git
+cd phonemizer-fork
+pip install .
+```
+That is it. You now have a multi-lingual phonemes for 100+ languages, including Vietnamese of course which we found maybe better than viphoneme (which is still buggy).
+
+```bashb
+cd src/f5_tts/model
+python preprocess_phoneme.py
+```
+
+After completing the conversion, it will create a `phonemes_metadata.jsonl` file inside your data directory of choice.
+
+* Now you can do the normal training. The training will now load the raw.arrow which now contains also the phoneme and will start training. 
+* We will warm up the duration predictor while freezing the rest of audio model for about 3 epochs then unfreezing entire model for finetuning.
+* Tensorboard will show you duration losses progress and other losses.
+
+```bash
+accelerate launch --mixed_precision=bf16 /home/steve/data02/TTS/F5-TTS/src/f5_tts/train/finetune_cli.py --exp_name F5TTS_v1_Custom_Prune_12 --learning_rate 2e-4 --weight_decay 0.001 --batch_size_per_gpu 16384 --batch_size_type frame --max_samples 64 --grad_accumulation_steps 4 --max_grad_norm 1.0 \
+--duration_focus_updates 12000 --duration_focus_weight 1.5 \
+--use_duration_predictor --duration_loss_weight 0.5 \
+--epochs 300 --num_warmup_updates 10000 --save_per_updates 3000 --keep_last_n_checkpoints 50 --last_per_updates 3000 \
+--dataset_name steve_combined_female --tokenizer char \
+--logger tensorboard --log_samples --from_scratch \
+--ref_audio_paths "/home/steve/data02/TTS/F5-TTS/Model_Pruning/female-vts.wav" \
+--ref_texts "ai đã đến hàng dương , đều không thể cầm lòng về những nấm mộ chen nhau , nhấp nhô trải khắp một vùng đồi . những nấm mộ có tên và không tên , nhưng nấm mộ lấp ló trong lùm cây , bụi cỏ ." \
+--ref_sample_text_prompts "sáng mười tám tháng bốn , cơ quan chức năng quảng ninh cho biết hiện cơ quan cảnh sát điều tra công an tỉnh quảng ninh đang tiếp tục truy bắt bùi đình khánh , ba mươi mốt tuổi , tay buôn ma túy đã xả súng làm một chiến sĩ công an hi sinh ."
+```
+
 ### ✨ Model Pruning ✨
 
 Optimize your model size and inference speed using our flexible pruning options. You can choose between automated, evenly distributed layer removal or manual, fine-grained block selection.
