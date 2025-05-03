@@ -9,7 +9,8 @@ from cached_path import cached_path
 
 from f5_tts.model import CFM, UNetT, DiT, Trainer, DurationPredictor
 from f5_tts.model.utils import get_tokenizer
-from f5_tts.model.dataset import load_dataset
+from f5_tts.model.dataset import load_dataset, collate_fn
+from torch.utils.data import DataLoader
 
 
 # -------------------------- Dataset Settings --------------------------- #
@@ -149,7 +150,7 @@ def parse_args():
         action="store_true",
         help="Use 8-bit Adam optimizer from bitsandbytes",
     )
-    parser.add_argument("--duration_loss_weight", type=float, default=0.1, 
+    parser.add_argument("--duration_loss_weight", type=float, default=0.5, 
                     help="Weight for the duration prediction loss (0.0 disables duration prediction)")
     parser.add_argument("--use_duration_predictor", action="store_true",
                     help="Enable the duration predictor")
@@ -176,7 +177,13 @@ def parse_args():
         default=None,
         help="Text prompts to use when generating samples from reference audios"
     )
-
+    
+    parser.add_argument('--duration_focus_updates', type=int, default=12000, # Should be atleast 1 epoch
+                        help='Number of updates to focus on duration predictor training')
+    
+    parser.add_argument('--duration_focus_weight', type=float, default=1.5, 
+                        help='Weight for duration loss during focus period')
+    
     return parser.parse_args()
 
 
@@ -441,22 +448,50 @@ def main():
         ref_texts=args.ref_texts,
         ref_audio_paths=args.ref_audio_paths,
         ref_sample_text_prompts=args.ref_sample_text_prompts,
+        duration_focus_updates=args.duration_focus_updates,
+        duration_focus_weight=args.duration_focus_weight
     )
     print("Trainer Initialized.")
-
 
     # --- Load Dataset ---
     print(f"Loading dataset '{args.dataset_name}' using tokenizer type '{args.tokenizer}'")
     train_dataset = load_dataset(args.dataset_name, args.tokenizer, mel_spec_kwargs=mel_spec_kwargs)
     print("Dataset Loaded.")
-
-
-    # --- Start Training ---
-    print("Starting trainer.train()...")
-    trainer.train(
-        train_dataset,
-        resumable_with_seed=666,
-    )
+    
+    # --- We'll use the phoneme information already in the arrow file ---
+    # The phoneme data should now be part of train_dataset
+    if args.use_duration_predictor:
+        print("Training will use phoneme data from the arrow file for duration prediction")
+        
+        # Add indexing information to the collate function
+        def collate_with_index(batch):
+            # First get the original collated data
+            collated_data = collate_fn(batch)
+            
+            # Add indices to the data dictionary
+            collated_data['index'] = list(range(len(batch)))
+            
+            # Add phoneme data if it exists in the batch
+            if 'phoneme' in batch[0]:
+                collated_data['phoneme'] = [item.get('phoneme', []) for item in batch]
+            
+            return collated_data
+        
+        # Now train with our enhanced dataset
+        print("Starting trainer.train() with phoneme data for duration prediction...")
+        trainer.train(
+            train_dataset,
+            # No need for a separate phonemes_dataset - we'll use the train_dataset itself
+            resumable_with_seed=666,
+        )
+    else:
+        # Standard training without duration prediction
+        print("Starting trainer.train() without duration prediction...")
+        trainer.train(
+            train_dataset,
+            resumable_with_seed=666,
+        )
+    
     print("Training finished or exited.")
 
 

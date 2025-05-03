@@ -74,6 +74,8 @@ def main(model_cfg):
         ref_texts=model_cfg.reference_samples.ref_texts,
         ref_audio_paths=model_cfg.reference_samples.ref_audio_paths,
         ref_sample_text_prompts=model_cfg.reference_samples.ref_sample_text_prompts,
+        duration_focus_updates=model_cfg.duration_focus_updates,
+        duration_focus_weight=model_cfg.duration_focus_weight
     )
 
     train_dataset = load_dataset(model_cfg.datasets.name, tokenizer, mel_spec_kwargs=model_cfg.model.mel_spec)

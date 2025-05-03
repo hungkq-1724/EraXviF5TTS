@@ -2,7 +2,10 @@ LICENSE
 README.md
 pyproject.toml
 ruff.toml
+.ipynb_checkpoints/README-checkpoint.md
 .ipynb_checkpoints/pyproject-checkpoint.toml
+src/README.md
+src/.ipynb_checkpoints/README-checkpoint.md
 src/f5_tts/api.py
 src/f5_tts/socket_client.py
 src/f5_tts/socket_server.py
@@ -57,9 +60,11 @@ src/f5_tts/infer/examples/multi/story.toml
 src/f5_tts/infer/examples/multi/story.txt
 src/f5_tts/infer/examples/multi/town.flac
 src/f5_tts/model/__init__.py
+src/f5_tts/model/alignment_utils.py
 src/f5_tts/model/cfm.py
 src/f5_tts/model/dataset.py
 src/f5_tts/model/duration_predictor.py
+src/f5_tts/model/f5tts_wrapper-dur_pred.py
 src/f5_tts/model/modules.py
 src/f5_tts/model/trainer.py
 src/f5_tts/model/utils.py
@@ -73,6 +78,7 @@ src/f5_tts/model/.ipynb_checkpoints/utils-checkpoint.py
 src/f5_tts/model/__pycache__/__init__.cpython-310.pyc
 src/f5_tts/model/__pycache__/cfm.cpython-310.pyc
 src/f5_tts/model/__pycache__/dataset.cpython-310.pyc
+src/f5_tts/model/__pycache__/duration_predictor.cpython-310.pyc
 src/f5_tts/model/__pycache__/modules.cpython-310.pyc
 src/f5_tts/model/__pycache__/trainer.cpython-310.pyc
 src/f5_tts/model/__pycache__/utils.cpython-310.pyc
@@ -95,6 +101,7 @@ src/f5_tts/train/.ipynb_checkpoints/distil_reload-checkpoint.py
 src/f5_tts/train/.ipynb_checkpoints/finetune_cli-checkpoint.py
 src/f5_tts/train/.ipynb_checkpoints/finetune_gradio-checkpoint.py
 src/f5_tts/train/.ipynb_checkpoints/train-checkpoint.py
+src/f5_tts/train/__pycache__/finetune_cli.cpython-310.pyc
 src/f5_tts/train/__pycache__/finetune_gradio.cpython-310.pyc
 src/f5_tts/train/datasets/prepare_csv_wavs.py
 src/f5_tts/train/datasets/prepare_emilia.py
@@ -118,9 +125,10 @@ src/model_pruning/inspect_pt.py
 src/model_pruning/pt_to_safetensor.py
 src/model_pruning/reset_f5tts_epoch_enhanced.py
 src/model_pruning/.ipynb_checkpoints/reset_f5tts_epoch_enhanced-checkpoint.py
-src/viTTS.egg-info/PKG-INFO
-src/viTTS.egg-info/SOURCES.txt
-src/viTTS.egg-info/dependency_links.txt
-src/viTTS.egg-info/entry_points.txt
-src/viTTS.egg-info/requires.txt
-src/viTTS.egg-info/top_level.txt
+src/streaming/client.html
+src/streaming/f5tts-fastapi-server.py
+src/streaming/f5tts-node-client.js
+src/streaming/f5tts_wrapper.py
+src/streaming/.ipynb_checkpoints/client-checkpoint.html
+src/streaming/.ipynb_checkpoints/f5tts-fastapi-server-checkpoint.py
+src/streaming/.ipynb_checkpoints/f5tts-node-client-checkpoint.js

@@ -28,9 +28,8 @@ class DurationPredictor(nn.Module):
   def forward(self, x, x_mask, g=None):
     x = x + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
     x = self.text_embed(x).transpose(1,2) # [b dim nt]
-    # x = x.transpose(1,2) # [b dim nt]
     x_mask = x_mask.unsqueeze(2).transpose(1,2) # [b 1 nt]
-    # x = torch.detach(x)
+    
     if g is not None:
       g = torch.detach(g)
       x = x + self.cond(g)
@@ -43,4 +42,28 @@ class DurationPredictor(nn.Module):
     x = self.norm_2(x)
     x = self.drop(x)
     x = self.proj(x * x_mask)
+    return x * x_mask
+
+  def phoneme_forward(self, phoneme_indices, phoneme_mask, g=None):
+    """Forward pass with phoneme indices instead of text tokens"""
+    # Similar to forward but adapted for phonemes
+    x = phoneme_indices
+    x = self.text_embed(x).transpose(1,2)  # [b dim nt]
+    
+    x_mask = phoneme_mask.unsqueeze(2).transpose(1,2)  # [b 1 nt]
+    
+    if g is not None:
+        g = torch.detach(g)
+        x = x + self.cond(g)
+    
+    x = self.conv_1(x * x_mask)
+    x = torch.relu(x)
+    x = self.norm_1(x)
+    x = self.drop(x)
+    x = self.conv_2(x * x_mask)
+    x = torch.relu(x)
+    x = self.norm_2(x)
+    x = self.drop(x)
+    x = self.proj(x * x_mask)
+    
     return x * x_mask

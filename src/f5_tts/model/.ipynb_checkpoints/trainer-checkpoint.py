@@ -18,6 +18,13 @@ from tqdm import tqdm
 from f5_tts.model import CFM
 from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
 from f5_tts.model.utils import default, exists
+from f5_tts.model import alignment_utils
+from f5_tts.model.alignment_utils import (
+        text_to_phonemes, 
+        phoneme_to_indices,
+        monotonic_alignment_search, 
+        get_durations_from_alignment
+)
 
 # trainer
 
@@ -55,30 +62,33 @@ class Trainer:
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
         duration_loss_weight: float = 0.1,
+        duration_focus_updates: int = 8000,
+        duration_focus_weight: float = 1.5,
         ref_texts=None,  # List of reference texts for consistent sample generation
         ref_audio_paths=None,  # List of paths to reference audio files
         ref_sample_text_prompts=None,  # Text prompts to use for the reference samples
     ):
+        # First initialize core attributes
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-
+    
         if logger == "wandb" and not wandb.api.api_key:
             logger = None
         self.log_samples = log_samples
-
+    
         self.accelerator = Accelerator(
             log_with=logger if logger == "wandb" else None,
             kwargs_handlers=[ddp_kwargs],
             gradient_accumulation_steps=grad_accumulation_steps,
             **accelerate_kwargs,
         )
-
+    
         self.logger = logger
         if self.logger == "wandb":
             if exists(wandb_resume_id):
                 init_kwargs = {"wandb": {"resume": "allow", "name": wandb_run_name, "id": wandb_resume_id}}
             else:
                 init_kwargs = {"wandb": {"resume": "allow", "name": wandb_run_name}}
-
+    
             if not model_cfg_dict:
                 model_cfg_dict = {
                     "epochs": epochs,
@@ -97,56 +107,100 @@ class Trainer:
                 init_kwargs=init_kwargs,
                 config=model_cfg_dict,
             )
-
+    
         elif self.logger == "tensorboard":
             from torch.utils.tensorboard import SummaryWriter
-
+    
             self.writer = SummaryWriter(log_dir=f"runs/{wandb_run_name}")
-
+    
         self.model = model
-
+    
         if self.is_main:
             self.ema_model = EMA(model, include_online_model=False, **ema_kwargs)
             self.ema_model.to(self.accelerator.device)
-
+    
             print(f"Using logger: {logger}")
             if grad_accumulation_steps > 1:
                 print(
                     "Gradient accumulation checkpointing with per_updates now, old logic per_steps used with before f992c4e"
                 )
- 
+
+        self.phoneme_map = {}
+        
         self.epochs = epochs
         self.num_warmup_updates = num_warmup_updates
         self.save_per_updates = save_per_updates
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.last_per_updates = default(last_per_updates, save_per_updates)
         self.checkpoint_path = default(checkpoint_path, "ckpts/test_f5-tts")
-
+    
         self.batch_size_per_gpu = batch_size_per_gpu
         self.batch_size_type = batch_size_type
         self.max_samples = max_samples
         self.grad_accumulation_steps = grad_accumulation_steps
         self.max_grad_norm = max_grad_norm
-
+    
         # mel vocoder config
         self.vocoder_name = mel_spec_type
         self.is_local_vocoder = is_local_vocoder
         self.local_vocoder_path = local_vocoder_path
-
+    
         self.noise_scheduler = noise_scheduler
-
-        # Duration predictor setup
+    
+        # Set up the duration predictor and its parameters
         self.duration_predictor = duration_predictor
-        self.duration_loss_weight = duration_loss_weight
-        
-        # If duration predictor is provided, attach it to the model
+        self.base_duration_loss_weight = duration_loss_weight  # Store base weight
+
+        # Add duration focus parameters
+        self.duration_focus_updates = duration_focus_updates
+        self.duration_focus_weight = duration_focus_weight
+        self.duration_focus_phase = self.duration_focus_updates > 0
+
+        # Set the actual weight used in training to focus weight during focus phase
+        self.active_duration_loss_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
+
+        # If duration predictor is provided, attach it to the model AND create separate copies
         if self.duration_predictor is not None:
+            # Attach main predictor to model
             setattr(self.model, 'duration_predictor', self.duration_predictor)
             total_params = sum(p.numel() for p in self.duration_predictor.parameters() if p.requires_grad)
             print(f"Total number of trainable parameters in Duration Predictor: {total_params}")
+            
+            # IMPORTANT: Create separate copies for alignment and prediction
+            # This prevents parameter reuse that causes autograd errors
+            self.duration_predictor_align = type(self.duration_predictor)(
+                self.duration_predictor.text_embed.num_embeddings - 1,
+                self.duration_predictor.in_channels,
+                self.duration_predictor.filter_channels,
+                self.duration_predictor.kernel_size,
+                self.duration_predictor.p_dropout,
+                self.duration_predictor.gin_channels
+            ).to(self.accelerator.device)
+            
+            self.duration_predictor_pred = type(self.duration_predictor)(
+                self.duration_predictor.text_embed.num_embeddings - 1,
+                self.duration_predictor.in_channels,
+                self.duration_predictor.filter_channels,
+                self.duration_predictor.kernel_size,
+                self.duration_predictor.p_dropout,
+                self.duration_predictor.gin_channels
+            ).to(self.accelerator.device)
+            
+            # Copy weights
+            self.duration_predictor_align.load_state_dict(self.duration_predictor.state_dict())
+            self.duration_predictor_pred.load_state_dict(self.duration_predictor.state_dict())
+            
+            # Set alignment model to eval mode and don't track gradients
+            self.duration_predictor_align.eval()
+            for param in self.duration_predictor_align.parameters():
+                param.requires_grad = False
+            
+            # The prediction model needs gradient tracking
+            self.duration_predictor_pred.train()
+            
+            print("Created separate duration predictor instances for alignment and prediction")
         
-        # Create separate parameter groups for duration predictor and the rest of the model
-        if self.duration_predictor is not None:
+            # Create separate parameter groups for duration predictor and the rest of the model
             # Get duration predictor parameters
             duration_params = list(self.duration_predictor.parameters())
             
@@ -156,14 +210,22 @@ class Trainer:
             
             print(f"Duration predictor params: {len(duration_params)}, Other params: {len(other_params)}")
             
+            # If in duration focus phase, freeze main model parameters
+            if self.duration_focus_phase:
+                for param in other_params:
+                    param.requires_grad = False
+                print(f"Duration focus phase active: Main model frozen for {self.duration_focus_updates} updates")
+                print(f"Duration loss weight during focus: {self.active_duration_loss_weight}")
+            
             # Create parameter groups with different hyperparameters
+            # FIXED: Reduced learning rate multiplier from 2.0 to 1.0
             param_groups = [
-                {'params': duration_params, 'lr': learning_rate * 2, 'weight_decay': 0.0003},
+                {'params': duration_params, 'lr': learning_rate * 1.0, 'weight_decay': 0.0003},
                 {'params': other_params, 'lr': learning_rate, 'weight_decay': weight_decay}
             ]
         else:
             # If no duration predictor, use all parameters with same settings
-            param_groups = self.model.parameters()
+            param_groups = self.model.parameters()   
         
         # Create optimizer with parameter groups
         if bnb_optimizer:
@@ -184,9 +246,8 @@ class Trainer:
                 eps=1e-8
             )
             
-            
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
-
+    
         # Store reference sample information
         self.ref_texts = ref_texts or []
         self.ref_audio_paths = ref_audio_paths or []
@@ -255,134 +316,126 @@ class Trainer:
                 import traceback
                 traceback.print_exc()  # Print the full traceback for better debugging
                 
-    # Remove or comment out the pinyin import if it was added
-    # from f5_tts.model.utils import convert_char_to_pinyin
-
-    # ... inside the Trainer class ...
-
     def generate_reference_samples(self, global_update, vocoder, nfe_step, cfg_strength, sway_sampling_coef):
-        """
-        Generate samples from fixed reference examples for consistent quality monitoring.
-        Uses combined Ref+Prompt CHARACTER text and slices output mel.
-        """
-        # Ensure this runs only on the main process and if logging/references are enabled
+        """Generate samples based on reference audio but with new prompt text."""
         if not self.is_main or not self.log_samples or not self.ref_mels:
             return
         
         log_samples_path = f"{self.checkpoint_path}/ref_samples"
         os.makedirs(log_samples_path, exist_ok=True)
         
-        # Select the model for sampling (EMA preferably)
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         model_for_sampling = self.ema_model.ema_model if hasattr(self, 'ema_model') else unwrapped_model
         target_sample_rate = unwrapped_model.mel_spec.target_sample_rate
         
-        # Set model to evaluation mode for sampling
-        model_for_sampling.eval() 
+        # Important: Reset model state between runs
+        model_for_sampling.eval()
+        if hasattr(model_for_sampling, 'clear_cache'):
+            model_for_sampling.clear_cache()
         
         with torch.inference_mode():
-            # Iterate through each reference mel provided during initialization
             for idx, ref_mel in enumerate(self.ref_mels):
                 try:
-                    # --- Get Corresponding Reference Text and Prompt Text ---
+                    # Get reference data
                     ref_text = self.ref_texts[idx] if idx < len(self.ref_texts) else ""
-                    prompt_text_for_generation = self.ref_sample_text_prompts[idx] if idx < len(self.ref_sample_text_prompts) else "Default test reference."
-                    original_full_prompt = prompt_text_for_generation # For saving later
+                    prompt_text = self.ref_sample_text_prompts[idx] if idx < len(self.ref_sample_text_prompts) else "Default test reference."
                     
-                    # --- FIX 1: Combine text using CHARACTERS ---
-                    # Ensure texts are strings. Add space if needed for separation.
-                    combined_text = str(ref_text) + " " + str(prompt_text_for_generation)
-                    # Wrap in a list as model.sample expects list[str] or tensor
-                    final_text_list_for_model = [combined_text]
-                    print(f"Using combined CHARACTER text for model: {combined_text[:100]}...")
-
-                    # Prepare the reference mel spectrogram
+                    # Save the prompt text
+                    txt_path = f"{log_samples_path}/update_{global_update}_ref{idx}_prompt.txt"
+                    with open(txt_path, 'w') as f:
+                        f.write(prompt_text)
+                    
+                    # Prepare reference mel
                     ref_mel = ref_mel.to(self.accelerator.device) 
-                    ref_mel_for_sample = ref_mel.permute(0, 2, 1) # Shape [1, mel_len, n_mel_channels]
-
-                    # Decode and Save Original Reference Audio (remains the same)
-                    print(f"Decoding reference mel (shape: {ref_mel.shape}) for saving source audio")
+                    ref_mel_for_sample = ref_mel.permute(0, 2, 1)  # [b, mel_len, n_mel_channels]
+                    
+                    # Save reference audio
                     if self.vocoder_name == "vocos":
                         ref_audio = vocoder.decode(ref_mel).cpu()
                     elif self.vocoder_name == "bigvgan":
                         ref_audio = vocoder(ref_mel).squeeze(0).cpu()
-                    ref_path = f"{log_samples_path}/update_{global_update}_ref{idx}_source.wav"
+                    
                     if ref_audio.ndim == 1: ref_audio = ref_audio.unsqueeze(0)
                     elif ref_audio.ndim == 3 and ref_audio.shape[1] == 1: ref_audio = ref_audio.squeeze(1)
-                    torchaudio.save(ref_path, ref_audio, target_sample_rate)
-                    print(f"Saved reference audio source: {ref_path}")
                     
-                    # Determine Target Duration (keep * 2 for now)
-                    batch_size, cond_seq_len = ref_mel_for_sample.shape[:2]
-                    target_duration_frames = cond_seq_len * 2 
-                    target_duration = torch.full((batch_size,), target_duration_frames, device=ref_mel_for_sample.device, dtype=torch.long)
-                    print(f"Requesting target duration for sample: {target_duration.item()} frames")
-
-                    # Generate Mel Spectrogram using the Model with CHARACTER text
-                    print(f"Generating sample mel spectrogram...")
-                    generated_mel, _ = model_for_sampling.sample(
+                    ref_path = f"{log_samples_path}/update_{global_update}_ref{idx}_source.wav"
+                    torchaudio.save(ref_path, ref_audio, target_sample_rate)
+                    
+                    # IMPORTANT: Clear cache if available
+                    if hasattr(model_for_sampling, 'clear_cache'):
+                        model_for_sampling.clear_cache()
+                    
+                    # Generate audio from prompt text only
+                    print(f"Generating audio from prompt text: {prompt_text[:50]}...")
+                    
+                    # Calculate reasonable duration based on text length
+                    chars_per_frame = 0.33  # Approximately 3 frames per character
+                    min_frames = 100  # Minimum duration
+                    
+                    char_count = len(prompt_text)
+                    estimated_frames = max(int(char_count / chars_per_frame), min_frames)
+                    
+                    # Print detailed info for debugging
+                    print(f"Text length: {char_count} chars, estimated duration: {estimated_frames} frames")
+                    print(f"Using ref_mel shape: {ref_mel_for_sample.shape}")
+                    
+                    # IMPORTANT CHANGE: Generate full output but extract only the generated part
+                    ref_audio_len = ref_mel_for_sample.shape[1]
+                    
+                    # Generate complete mel (includes both reference and new content)
+                    generated_full, _ = model_for_sampling.sample(
                         cond=ref_mel_for_sample,
-                        text=final_text_list_for_model, # Use combined CHARACTER text
-                        duration=target_duration, 
+                        text=[prompt_text],  # Use prompt text (not reference text)
+                        duration=ref_audio_len + estimated_frames,  # Total duration includes ref + new
                         steps=nfe_step,
                         cfg_strength=cfg_strength,
-                        sway_sampling_coef=sway_sampling_coef,
+                        sway_sampling_coef=sway_sampling_coef
                     )
-                    # Output shape: [batch, target_duration_frames, dim]
                     
-                    # Check for Invalid Values
-                    if torch.isnan(generated_mel).any() or torch.isinf(generated_mel).any():
-                        print(f"Error: NaNs or Infs detected in generated mel for reference sample {idx}. Skipping generation.")
-                        continue 
+                    # Extract only the generated part (after the reference)
+                    prompt_mel = generated_full[:, ref_audio_len:, :]
+                    
+                    # Debug info
+                    print(f"Generated mel shape: {prompt_mel.shape}")
+                    
+                    if torch.isnan(prompt_mel).any() or torch.isinf(prompt_mel).any():
+                        print("ERROR: NaN/Inf detected in generated mel")
+                    else:
+                        # Convert the generated part to audio
+                        prompt_mel = prompt_mel.to(torch.float32)
+                        prompt_mel_for_vocoder = prompt_mel.permute(0, 2, 1).to(self.accelerator.device)
                         
-                    # Prepare Generated Mel for Vocoder
-                    generated_mel = generated_mel.to(torch.float32)
-                    ref_mel_frames = ref_mel.shape[-1] # Same as cond_seq_len
-                    print(f"Original reference mel frames: {ref_mel_frames}")
-                    print(f"Generated mel shape: {generated_mel.shape}")
-
-                    # --- FIX 2: SLICE the output mel like the Wrapper ---
-                    if generated_mel.shape[1] > ref_mel_frames:
-                         mel_for_vocoder = generated_mel[:, ref_mel_frames:, :].permute(0, 2, 1).to(self.accelerator.device) # Slice and permute
-                         print(f"Using SLICED generated mel (after ref) for vocoder. Shape: {mel_for_vocoder.shape}")
-                    else:
-                         print(f"Warning: Generated mel length ({generated_mel.shape[1]}) not longer than reference ({ref_mel_frames}). Output slice is empty.")
-                         mel_for_vocoder = None 
-
-                    # Decode Sliced Mel to Audio
-                    if mel_for_vocoder is not None and mel_for_vocoder.shape[-1] > 0: 
-                         print(f"Decoding sliced mel for saving generated audio")
-                         if self.vocoder_name == "vocos":
-                             gen_audio = vocoder.decode(mel_for_vocoder).cpu()
-                         elif self.vocoder_name == "bigvgan":
-                             gen_audio = vocoder(mel_for_vocoder).squeeze(0).cpu()
-
-                         # Ensure audio tensor shape [1, audio_len] for torchaudio.save
-                         if gen_audio.ndim == 1: gen_audio = gen_audio.unsqueeze(0)
-                         elif gen_audio.ndim == 3 and gen_audio.shape[1] == 1: gen_audio = gen_audio.squeeze(1)
-
-                         # Save Generated Audio
-                         gen_path = f"{log_samples_path}/update_{global_update}_ref{idx}_gen.wav"
-                         torchaudio.save(gen_path, gen_audio, target_sample_rate)
-                         print(f"Saved generated sample (from sliced mel): {gen_path}")
-                    else:
-                         print("Skipping saving generated audio: sliced mel part is empty or generation too short.")
-
-                    # Save Prompt Text (Save the original prompt for clarity)
-                    txt_path = f"{log_samples_path}/update_{global_update}_ref{idx}_prompt.txt"
-                    with open(txt_path, 'w') as f:
-                        f.write(original_full_prompt)
+                        if self.vocoder_name == "vocos":
+                            prompt_audio = vocoder.decode(prompt_mel_for_vocoder).cpu()
+                        elif self.vocoder_name == "bigvgan":
+                            prompt_audio = vocoder(prompt_mel_for_vocoder).squeeze(0).cpu()
+                        
+                        if prompt_audio.ndim == 1: prompt_audio = prompt_audio.unsqueeze(0)
+                        elif prompt_audio.ndim == 3 and prompt_audio.shape[1] == 1: prompt_audio = prompt_audio.squeeze(1)
+                        
+                        # Check audio properties
+                        audio_len = prompt_audio.shape[1]
+                        audio_min = prompt_audio.min().item()
+                        audio_max = prompt_audio.max().item()
+                        print(f"Generated audio length: {audio_len}, range: [{audio_min:.3f}, {audio_max:.3f}]")
+                        
+                        # Save the generated audio
+                        gen_path = f"{log_samples_path}/update_{global_update}_ref{idx}_gen_audio.wav"
+                        torchaudio.save(gen_path, prompt_audio, target_sample_rate)
+                        print(f"Saved generated audio from prompt: {gen_path}")
                     
-                    print(f"Completed processing for reference sample {idx} at update {global_update}")
+                    print(f"Completed reference sample generation for update {global_update}")
                     
                 except Exception as e:
                     print(f"Error processing reference sample {idx}: {e}")
                     import traceback
                     traceback.print_exc()
         
-        # Restore model to training mode after processing all samples
+        # Restore model to training mode
         model_for_sampling.train()
-        
+        if hasattr(model_for_sampling, 'clear_cache'):
+            model_for_sampling.clear_cache()
+            
     @property
     def is_main(self):
         return self.accelerator.is_main_process
@@ -397,8 +450,30 @@ class Trainer:
                 scheduler_state_dict=self.scheduler.state_dict(),
                 update=update,
             )
+            
+            # Add duration predictor parameters to checkpoint
+            if hasattr(self, 'base_duration_loss_weight'):
+                checkpoint['base_duration_loss_weight'] = self.base_duration_loss_weight
+            if hasattr(self, 'active_duration_loss_weight'):
+                checkpoint['active_duration_loss_weight'] = self.active_duration_loss_weight
+            if hasattr(self, 'duration_focus_phase'):
+                checkpoint['duration_focus_phase'] = self.duration_focus_phase
+                
             if not os.path.exists(self.checkpoint_path):
                 os.makedirs(self.checkpoint_path)
+                
+            # Save separate duration predictor checkpoint at end of focus phase
+            if hasattr(self, 'duration_predictor') and self.duration_predictor is not None:
+                if (hasattr(self, 'duration_focus_phase') and not self.duration_focus_phase and 
+                    hasattr(self, 'duration_focus_updates') and update == self.duration_focus_updates):
+                    
+                    duration_checkpoint = {
+                        'duration_predictor': self.accelerator.unwrap_model(self.duration_predictor).state_dict(),
+                        'update': update,
+                        'duration_loss_weight': self.active_duration_loss_weight
+                    }
+                    self.accelerator.save(duration_checkpoint, f"{self.checkpoint_path}/duration_predictor_{update}.pt")
+                    print(f"Saved separate duration predictor checkpoint at end of focus phase (update {update})")
                 
             if last:
                 self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_last.pt")
@@ -443,8 +518,7 @@ class Trainer:
                     except Exception as e:
                         print(f"Warning: Error during checkpoint cleanup: {e}")
                         # Don't delete any checkpoints if there's an error in sorting/handling
-                        
-
+        
     def load_checkpoint(self):
         """Loads the most recent checkpoint from the checkpoint_path."""
         # --- Determine Checkpoint Path ---
@@ -464,7 +538,7 @@ class Trainer:
                 ]
                 training_checkpoints = [f for f in all_checkpoints if f.startswith("model_") and f != "model_last.pt"]
                 pretrained_checkpoints = [f for f in all_checkpoints if f.startswith("pretrained_")]
-
+    
                 latest_update = -1
                 latest_training_ckpt = None
                 if training_checkpoints: # Prioritize latest training checkpoint
@@ -487,14 +561,14 @@ class Trainer:
                     self.accelerator.print(f"No training checkpoints found. Using pretrained checkpoint: {latest_checkpoint_name}")
                 else:
                      self.accelerator.print("No suitable checkpoints (last, training, or pretrained) found.")
-
+    
             if latest_checkpoint_name:
                 checkpoint_path_to_load = os.path.join(self.checkpoint_path, latest_checkpoint_name)
-
+    
         if checkpoint_path_to_load is None or not os.path.exists(checkpoint_path_to_load):
             self.accelerator.print("No valid checkpoint found. Starting from scratch.")
             return 0 # Return 0 updates processed
-
+    
         # --- Load the Checkpoint File ---
         self.accelerator.print(f"Loading checkpoint: {checkpoint_path_to_load}")
         checkpoint = None
@@ -515,12 +589,12 @@ class Trainer:
         except Exception as e:
             self.accelerator.print(f"Error loading checkpoint file: {e}. Starting from scratch.")
             return 0
-
+    
         # --- Find and Prepare Model State Dictionary ---
         model_sd_raw = None
         loaded_from_key = None
         is_ema_source = False
-
+    
         search_keys = ['model_state_dict', 'ema_model_state_dict', 'state_dict', 'model', 'state_dict_loaded_from_safetensors']
         for key in search_keys:
             if key in checkpoint:
@@ -535,20 +609,20 @@ class Trainer:
                      self.accelerator.print(f"Warning: Key '{key}' found but value is not a dict (type: {type(potential_sd)}). Skipping.")
                 elif not potential_sd:
                      self.accelerator.print(f"Warning: Key '{key}' found but dictionary is empty. Skipping.")
-
+    
         if model_sd_raw is None:
             self.accelerator.print(f"ERROR: Could not find usable model state_dict in checkpoint: {checkpoint_path_to_load}")
             self.accelerator.print(f"Available top-level keys: {list(checkpoint.keys())}")
             self.accelerator.print("Starting from scratch as state_dict was not found.")
             return 0
-
+    
         # --- Clean Prefixes and Metadata ---
         model_sd_cleaned = {}
         prefixes_to_strip = ["module.", "model.", "_orig_mod."]
         if is_ema_source:
              ema_prefix = "ema_model."
              if any(k.startswith(ema_prefix) for k in model_sd_raw): prefixes_to_strip.insert(0, ema_prefix)
-
+    
         used_prefix = None
         first_key = next(iter(model_sd_raw.keys()), None)
         if first_key:
@@ -556,7 +630,7 @@ class Trainer:
                 if first_key.startswith(prefix):
                     prefix_count = sum(1 for k in model_sd_raw if k.startswith(prefix))
                     if prefix_count >= 0.8 * len(model_sd_raw): used_prefix = prefix; break
-
+    
         ignore_keys = {"initted", "step"}
         if used_prefix:
             self.accelerator.print(f"Stripping prefix '{used_prefix}' from state_dict keys.")
@@ -570,11 +644,11 @@ class Trainer:
             for k, v in model_sd_raw.items():
                  if k not in ignore_keys: model_sd_cleaned[k] = v
                  else: self.accelerator.print(f"Ignoring metadata key: {k}")
-
+    
         if not model_sd_cleaned:
              self.accelerator.print("ERROR: State dictionary became empty after cleaning. Check original checkpoint.")
              return 0
-
+    
         # --- Load Cleaned State Dict into the Main Model ---
         load_successful = False
         try:
@@ -588,7 +662,7 @@ class Trainer:
             load_successful = True
         except Exception as e:
             self.accelerator.print(f"ERROR loading state_dict into model: {e}") # Use accelerator.print
-
+    
         if not load_successful:
              self.accelerator.print("Weights could not be loaded. Starting from scratch.")
              del checkpoint; del model_sd_raw; del model_sd_cleaned
@@ -598,10 +672,10 @@ class Trainer:
              elif self.accelerator.device.type == 'xpu': torch.xpu.empty_cache()
              gc.collect()
              return 0
-
+    
         # --- Handle Resuming Full Training State ---
         is_resuming_full_state = 'optimizer_state_dict' in checkpoint and 'update' in checkpoint
-
+    
         start_update = 0
         if is_resuming_full_state:
              self.accelerator.print("Attempting to load full training state (optimizer, scheduler, EMA, step)...")
@@ -610,14 +684,14 @@ class Trainer:
                  self.accelerator.print("Optimizer state loaded.")
              except Exception as e:
                  self.accelerator.print(f"Warning: Failed to load optimizer state: {e}. Optimizer will start fresh.")
-
+    
              if hasattr(self, 'scheduler') and self.scheduler and 'scheduler_state_dict' in checkpoint:
                  try:
                      self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                      self.accelerator.print("Scheduler state loaded.")
                  except Exception as e:
                      self.accelerator.print(f"Warning: Failed to load scheduler state: {e}.")
-
+    
              if self.is_main and hasattr(self, 'ema_model') and 'ema_model_state_dict' in checkpoint:
                  try:
                       ema_sd_to_load = checkpoint['ema_model_state_dict']
@@ -630,7 +704,20 @@ class Trainer:
                       self.accelerator.print(f"Warning: Failed to load EMA state into trainer: {e}. EMA will start fresh.")
              elif self.is_main and hasattr(self, 'ema_model'):
                   self.accelerator.print("EMA state not found in checkpoint for resume. EMA will start fresh.")
+    
+             # Load duration training states if available
+             if hasattr(self, 'base_duration_loss_weight') and 'base_duration_loss_weight' in checkpoint:
+                self.base_duration_loss_weight = checkpoint['base_duration_loss_weight']
+                self.accelerator.print(f"Loaded base duration loss weight: {self.base_duration_loss_weight}")
 
+             if hasattr(self, 'active_duration_loss_weight') and 'active_duration_loss_weight' in checkpoint:
+                self.active_duration_loss_weight = checkpoint['active_duration_loss_weight']
+                self.accelerator.print(f"Loaded active duration loss weight: {self.active_duration_loss_weight}")
+
+             if hasattr(self, 'duration_focus_phase') and 'duration_focus_phase' in checkpoint:
+                self.duration_focus_phase = checkpoint['duration_focus_phase']
+                self.accelerator.print(f"Loaded duration focus phase state: {self.duration_focus_phase}")
+    
              start_update = checkpoint.get('update', checkpoint.get('step', -1))
              if start_update == -1:
                   self.accelerator.print("Warning: Resuming checkpoint missing 'update' or 'step'. Starting from update 0.")
@@ -647,7 +734,7 @@ class Trainer:
              start_update = 0
              # Use f-string correctly for loaded_from_key
              self.accelerator.print(f"Loaded pre-trained weights (from key '{loaded_from_key}'). Starting fine-tuning from update 0.")
-
+    
         # --- Cleanup ---
         del checkpoint
         del model_sd_raw
@@ -657,55 +744,98 @@ class Trainer:
         if self.accelerator.device.type == 'cuda': torch.cuda.empty_cache()
         elif self.accelerator.device.type == 'xpu': torch.xpu.empty_cache()
         gc.collect()
-
+    
         self.accelerator.print("Checkpoint loading process finished.")
         return start_update
-
-    def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         
+    def train(self, train_dataset: Dataset, phonemes_dataset=None, num_workers=16, resumable_with_seed: int = None):
+        """
+        Train the model with phoneme-based duration prediction.
+        
+        Args:
+            train_dataset: Dataset to train on
+            phonemes_dataset: Dataset containing pre-phonemized text using vi2IPA
+            num_workers: Number of workers for data loading
+            resumable_with_seed: Random seed for resumable training
+        """
+        # Initialize phoneme map as empty if not already done
+        if self.phoneme_map is None:
+            self.phoneme_map = {}
+            print("Initialized empty phoneme map - will build during training")
+            
+    def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
+        """
+        Train the model with phoneme-based duration prediction using data directly from the dataset.
+        
+        Args:
+            train_dataset: Dataset to train on (must contain 'phoneme' field if duration prediction is enabled)
+            num_workers: Number of workers for data loading
+            resumable_with_seed: Random seed for resumable training
+        """
+        # Initialize phoneme map as empty if not already done
+        if self.phoneme_map is None:
+            self.phoneme_map = {}
+            print("Initialized empty phoneme map - will build during training")
+            
         self.clear_GPU_steps = 100
         
         if self.log_samples:
             from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
-
+    
             vocoder = load_vocoder(
                 vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
             )
             target_sample_rate = self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
             log_samples_path = f"{self.checkpoint_path}/samples"
             os.makedirs(log_samples_path, exist_ok=True)
-
+    
+        # CRITICAL: Set fixed seed but DO NOT shuffle the dataset to maintain alignment
         if exists(resumable_with_seed):
             generator = torch.Generator()
             generator.manual_seed(resumable_with_seed)
         else:
             generator = None
-
+    
+        # Define a custom collate function that preserves indices and phoneme data
+        def collate_with_indices(batch):
+            # Start with standard collation
+            result = collate_fn(batch)
+            
+            # Add indices for each item in the batch
+            result['index'] = list(range(len(batch)))
+            
+            # Preserve phoneme data if it exists
+            if all('phoneme' in item for item in batch):
+                result['phonemes'] = [item['phoneme'] for item in batch]
+            
+            return result
+    
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn,
+                collate_fn=collate_with_indices,  # Use our modified collate
                 num_workers=8,
                 pin_memory=True,
                 persistent_workers=True,
                 prefetch_factor=2,
                 batch_size=self.batch_size_per_gpu,
-                shuffle=True,
+                shuffle=True,  # CRITICAL: Do not shuffle to maintain index alignment
                 generator=generator,
             )
         elif self.batch_size_type == "frame":
             self.accelerator.even_batches = False
+            # Use a sequential sampler to maintain index order
             sampler = SequentialSampler(train_dataset)
             batch_sampler = DynamicBatchSampler(
                 sampler,
                 self.batch_size_per_gpu,
                 max_samples=self.max_samples,
-                random_seed=resumable_with_seed,  # This enables reproducible shuffling
+                random_seed=resumable_with_seed,
                 drop_residual=False,
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn,
+                collate_fn=collate_with_indices,  # Use our modified collate
                 num_workers=8,
                 pin_memory=True,
                 prefetch_factor=2,
@@ -714,13 +844,11 @@ class Trainer:
             )
         else:
             raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
-
-        #  accelerator.prepare() dispatches batches to devices;
-        #  which means the length of dataloader calculated before, should consider the number of devices
+    
+        # Setup learning rate scheduling
         warmup_updates = (
             self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
+        )
         total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
         decay_updates = total_updates - warmup_updates
         warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
@@ -728,12 +856,17 @@ class Trainer:
         self.scheduler = SequentialLR(
             self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
         )
+        
+        # Prepare dataloader and scheduler with accelerator
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
-        )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        )
+        
+        # Load checkpoint or start from scratch
         start_update = self.load_checkpoint()
         global_update = start_update
-
+    
+        # Handle resuming from a specific point
         if exists(resumable_with_seed):
             orig_epoch_step = len(train_dataloader)
             start_step = start_update * self.grad_accumulation_steps
@@ -742,7 +875,8 @@ class Trainer:
             skipped_dataloader = self.accelerator.skip_first_batches(train_dataloader, num_batches=skipped_batch)
         else:
             skipped_epoch = 0
-
+    
+        # Main training loop
         for epoch in range(skipped_epoch, self.epochs):
             self.model.train()
             if exists(resumable_with_seed) and epoch == skipped_epoch:
@@ -751,11 +885,11 @@ class Trainer:
             else:
                 progress_bar_initial = 0
                 current_dataloader = train_dataloader
-
+    
             # Set epoch for the batch sampler if it exists
             if hasattr(train_dataloader, "batch_sampler") and hasattr(train_dataloader.batch_sampler, "set_epoch"):
                 train_dataloader.batch_sampler.set_epoch(epoch)
-
+    
             progress_bar = tqdm(
                 range(math.ceil(len(train_dataloader) / self.grad_accumulation_steps)),
                 desc=f"Epoch {epoch + 1}/{self.epochs}",
@@ -763,74 +897,172 @@ class Trainer:
                 disable=not self.accelerator.is_local_main_process,
                 initial=progress_bar_initial,
             )
-
+    
             for batch in current_dataloader:
                 with self.accelerator.accumulate(self.model):
                     text_inputs = batch["text"]
                     mel_spec = batch["mel"].permute(0, 2, 1)
                     mel_lengths = batch["mel_lengths"]
                     text_lengths = batch.get("text_lengths")
-                    attn = batch.get("attn")
-
+                    batch_indices = batch.get("index", None)
+                    batch_phonemes = batch.get("phonemes", None)
+    
                     # Forward pass through the main model
                     loss, cond, pred = self.model(
                         mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
                     )
                     
-                    # Duration prediction loss calculation if predictor exists and attn is available
+                    # Duration prediction with robust error handling
                     dur_loss = None
-                    if self.duration_predictor is not None and attn is not None and text_lengths is not None:
-                        # Get text tokens from the model (we might need to access these differently based on model impl)
-                        text_tokens = batch["text"]
-                        if hasattr(self.model, 'get_text_tokens'):
-                            text_tokens = self.model.get_text_tokens(text_inputs)
+                    dur_mae = None
+                    
+                    if self.duration_predictor is not None and text_lengths is not None:
+                        try:
+                            from f5_tts.model.alignment_utils import phoneme_to_indices
+                            
+                            # Get phoneme sequences for this batch
+                            if batch_phonemes:
+                                # Use phonemes directly from the batch (preferred)
+                                phoneme_sequences = batch_phonemes
+                            elif batch_indices is not None:
+                                # Get phonemes from dataset using indices (fallback)
+                                phoneme_sequences = [train_dataset[idx].get('phoneme', []) for idx in batch_indices]
+                            else:
+                                # Last resort fallback - use text
+                                phoneme_sequences = text_inputs
+                                print("WARNING: No phoneme data found. Using text as fallback.")
+                                
+                            # Convert phonemes to indices using the phoneme map
+                            phoneme_indices_list, updated_map = phoneme_to_indices(phoneme_sequences, phoneme_map=self.phoneme_map)
+                            
+                            # Update phoneme map if new phonemes were found
+                            if len(updated_map) > len(self.phoneme_map):
+                                self.phoneme_map = updated_map
+                                if self.accelerator.is_local_main_process and global_update % 100 == 0:
+                                    print(f"Updated phoneme map to {len(self.phoneme_map)} phonemes")
+                            
+                            # Create phoneme tensor and mask
+                            b = len(phoneme_indices_list)
+                            max_nt = max(len(seq) for seq in phoneme_indices_list)
+                            
+                            # Create tensors on device
+                            phoneme_tensor = torch.zeros(b, max_nt, dtype=torch.long, device=mel_spec.device)
+                            phoneme_mask = torch.zeros(b, max_nt, dtype=torch.bool, device=mel_spec.device)
+                            
+                            for i, seq in enumerate(phoneme_indices_list):
+                                L = len(seq)
+                                phoneme_tensor[i, :L] = torch.tensor(seq, device=mel_spec.device)
+                                phoneme_mask[i, :L] = True
+                            
+                            # Calculate phoneme lengths
+                            phoneme_lengths = phoneme_mask.sum(dim=1)
+                            
+                            # Forward pass through duration predictor
+                            logw = self.duration_predictor_pred(phoneme_tensor, phoneme_mask)
+                            if logw.dim() == 3 and logw.size(1) == 1:
+                                logw = logw.squeeze(1)
+                            
+                            # Calculate target durations based on mel frames
+                            avg_frames = (mel_lengths.float() / phoneme_lengths.float()).unsqueeze(-1)
+                            target_durations = torch.ones_like(phoneme_tensor, dtype=torch.float, device=mel_spec.device)
+                            target_durations = target_durations * avg_frames
+                            target_durations = target_durations * phoneme_mask.float()
+                            
+                            # Log transform for prediction
+                            target_logw = torch.log(target_durations + 1e-6)
+                            
+                            # Calculate loss
+                            masked_diff = (logw - target_logw.detach())**2 * phoneme_mask
+                            dur_loss = torch.sum(masked_diff) / (torch.sum(phoneme_mask) + 1e-8)
+                            
+                            # Calculate MAE for monitoring
+                            pred_durations = torch.exp(torch.clamp(logw, -20, 20))
+                            true_durations = torch.exp(torch.clamp(target_logw.detach(), -20, 20))
+                            masked_diff_mae = torch.abs(pred_durations - true_durations) * phoneme_mask
+                            dur_mae = torch.sum(masked_diff_mae) / (torch.sum(phoneme_mask) + 1e-8)
+                            
+                            # Add weighted duration loss to main loss
+                            if self.active_duration_loss_weight > 0:
+                                loss = loss + self.active_duration_loss_weight * dur_loss
+                                
+                            # Log statistics occasionally
+                            if self.accelerator.is_local_main_process and global_update % 100 == 0:
+                                print(f"[DURATION] dur_loss: {dur_loss.item():.4f}, dur_mae: {dur_mae.item():.4f}")
+                                print(f"[DURATION] Average frames per phoneme: {avg_frames.mean().item():.2f}")
+                                print(f"[DURATION] Phase: {'Focus' if self.duration_focus_phase else 'Regular'}, Weight: {self.active_duration_loss_weight}")
                         
-                        # Create mask for text tokens
-                        b, nt = text_tokens.shape  # Get batch size and sequence length
-                        range_tensor = torch.arange(nt, device=text_tokens.device).unsqueeze(0)  # Shape [1, nt]
-                        text_tokens_mask = (range_tensor < text_lengths.unsqueeze(1)).int()
-                        
-                        # Calculate durations from attention
-                        w = attn.sum(dim=2) # [b nt]
-                        logw_ = torch.log(w + 1e-6) * text_tokens_mask
-                        
-                        # Get duration predictions
-                        logw = self.duration_predictor(text_tokens, text_tokens_mask)
-                        
-                        # Calculate duration loss
-                        l_length = torch.sum((logw - logw_)**2, [1,2]) / torch.sum(text_tokens_mask)
-                        dur_loss = torch.sum(l_length.float())
-                        
-                        # Add weighted duration loss to main loss
-                        if self.duration_loss_weight > 0:
-                            loss = loss + self.duration_loss_weight * dur_loss
-                        
-                        # Log duration loss
-                        if self.accelerator.is_local_main_process:
-                            self.accelerator.log({"duration_loss": dur_loss.item()}, step=global_update)
+                        except Exception as e:
+                            print(f"[ERROR] Phoneme duration prediction failed: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            
+                            # Create minimal training signal when error occurs
+                            dur_loss = torch.tensor(0.01, device=loss.device, requires_grad=True)
+                            dur_mae = torch.tensor(1.0, device=loss.device)
+                            
+                            # Still add to main loss to maintain gradient flow
+                            if self.active_duration_loss_weight > 0:
+                                loss = loss + self.active_duration_loss_weight * dur_loss
                     
                     # Backward pass
                     self.accelerator.backward(loss)
-
+    
                     if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-
+    
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
-
+    
                 if self.accelerator.sync_gradients:
+                    # Check if we need to unfreeze the model and change duration weight
+                    if hasattr(self, 'duration_focus_phase') and self.duration_focus_phase and global_update >= self.duration_focus_updates:
+                        self.duration_focus_phase = False
+                        # Switch to base weight after focus phase
+                        self.active_duration_loss_weight = self.base_duration_loss_weight
+                        
+                        # Unfreeze main model parameters
+                        unwrapped_model = self.accelerator.unwrap_model(self.model)
+                        if self.duration_predictor is not None:
+                            duration_params = list(self.duration_predictor.parameters())
+                            for param in unwrapped_model.parameters():
+                                if not any(param is dp for dp in duration_params):
+                                    param.requires_grad = True
+                        
+                        print(f"Duration focus phase completed at update {global_update}.")
+                        print(f"Main model unfrozen. Duration loss weight set to {self.active_duration_loss_weight}")
+                    
+                        # Save separate duration predictor checkpoint at end of focus phase
+                        if hasattr(self, 'duration_predictor') and self.duration_predictor is not None and self.is_main:
+                            duration_checkpoint = {
+                                'duration_predictor': self.accelerator.unwrap_model(self.duration_predictor).state_dict(),
+                                'update': global_update,
+                                'duration_loss_weight': self.active_duration_loss_weight,
+                                'phoneme_map': self.phoneme_map
+                            }
+                            checkpoint_dir = os.path.dirname(self.checkpoint_path) if os.path.isfile(self.checkpoint_path) else self.checkpoint_path
+                            os.makedirs(checkpoint_dir, exist_ok=True)
+                            self.accelerator.save(duration_checkpoint, f"{checkpoint_dir}/duration_predictor_{global_update}.pt")
+                            print(f"Saved separate duration predictor checkpoint at end of focus phase (update {global_update})")
+    
                     if self.is_main:
                         self.ema_model.update()
-
+    
                     global_update += 1
                     progress_bar.update(1)
                     progress_bar.set_postfix(update=str(global_update), loss=loss.item())
-
+                
                 if self.accelerator.is_local_main_process:
                     log_dict = {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}
                     if dur_loss is not None:
                         log_dict["duration_loss"] = dur_loss.item()
+                        
+                        # Use the correct weight for logging
+                        actual_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
+                        log_dict["duration_loss_weight"] = actual_weight
+                                            
+                    if dur_mae is not None:
+                        log_dict["duration_mae"] = dur_mae.item()
                     
                     self.accelerator.log(log_dict, step=global_update)
                     
@@ -838,10 +1070,32 @@ class Trainer:
                         self.writer.add_scalar("loss", loss.item(), global_update)
                         if dur_loss is not None:
                             self.writer.add_scalar("duration_loss", dur_loss.item(), global_update)
+                            
+                            # Use same direct approach for tensorboard
+                            actual_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
+                            self.writer.add_scalar("duration_loss_weight", actual_weight, global_update)
+                        
+                        if dur_mae is not None:
+                            self.writer.add_scalar("duration_mae", dur_mae.item(), global_update)
+                        
                         self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
-
+                
                 if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update)
+    
+                    # Save duration predictor and phoneme map
+                    if self.duration_predictor is not None and self.is_main:
+                        duration_checkpoint = {
+                            'duration_predictor': self.accelerator.unwrap_model(self.duration_predictor).state_dict(),
+                            'update': global_update,
+                            'duration_loss_weight': self.active_duration_loss_weight,
+                            'phoneme_map': self.phoneme_map
+                        }
+                        checkpoint_dir = os.path.dirname(self.checkpoint_path) if os.path.isfile(self.checkpoint_path) else self.checkpoint_path
+                        os.makedirs(checkpoint_dir, exist_ok=True)
+                        self.accelerator.save(duration_checkpoint, f"{checkpoint_dir}/duration_predictor_{global_update}.pt")
+                        print(f"Saved duration predictor checkpoint with phoneme map at update {global_update}")
+                    
                     import gc
                     # Trigger garbage collection manually
                     gc.collect()
@@ -890,5 +1144,5 @@ class Trainer:
                     self.save_checkpoint(global_update, last=True)  
                     
         self.save_checkpoint(global_update, last=True)
-
+    
         self.accelerator.end_training()

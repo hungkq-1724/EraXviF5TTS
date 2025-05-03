@@ -765,31 +765,50 @@ def get_correct_audio_path(
 def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
     path_project = os.path.join(path_data, name_project)
     path_project_wavs = os.path.join(path_project, "wavs")
-    file_metadata = os.path.join(path_project, "metadata.csv")
+    #file_metadata = os.path.join(path_project, "metadata.csv")
+    file_metadata = os.path.join(path_project, "phonemes_metadata.jsonl")
     file_raw = os.path.join(path_project, "raw.arrow")
     file_duration = os.path.join(path_project, "duration.json")
     file_vocab = os.path.join(path_project, "vocab.txt")
+    file_phonemes = os.path.join(path_project, "phonemes_dataset.jsonl")
 
     if not os.path.isfile(file_metadata):
         return "The file was not found in " + file_metadata, ""
 
-    with open(file_metadata, "r", encoding="utf-8-sig") as f:
-        data = f.read()
+    #with open(file_metadata, "r", encoding="utf-8-sig") as f:
+    #    data = f.read()
 
+    import json
+    data = []
+    with open(file_metadata, 'r') as f:
+        text = f.readline()
+        while text:
+            text = json.loads(text)
+            data.append(text)
+            text = f.readline()
+            
     audio_path_list = []
     text_list = []
     duration_list = []
 
-    count = data.split("\n")
+    count = len(data) # data.split("\n")
+    
     lenght = 0
     result = []
     error_files = []
+    phoneme_aligned = []
     text_vocab_set = set()
-    for line in progress.tqdm(data.split("\n"), total=count):
+    #for line in progress.tqdm(data.split("\n"), total=count):
+    for line in progress.tqdm(data, total=count):
+        '''
         sp_line = line.split("|")
         if len(sp_line) != 2:
             continue
         name_audio, text = sp_line[:2]
+        '''
+        name_audio = line["audio"]
+        text = line["text"]
+        phonem = line["phonemes"]
 
         file_audio = get_correct_audio_path(name_audio, path_project_wavs)
 
@@ -815,13 +834,16 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
             continue
 
         text = clear_text(text)
-        text = convert_char_to_pinyin([text], polyphone=True)[0]
+        # Never use convert_char_to_pinyin for Vietnamese, but anyway
+        #text = convert_char_to_pinyin([text], polyphone=True)[0]
 
+        
         audio_path_list.append(file_audio)
         duration_list.append(duration)
         text_list.append(text)
+        phoneme_aligned.append(line)
 
-        result.append({"audio_path": file_audio, "text": text, "duration": duration})
+        result.append({"audio_path": file_audio, "text": text, "duration": duration, "phoneme": phonem})
         if ch_tokenizer:
             text_vocab_set.update(list(text))
 
@@ -839,6 +861,10 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
 
     with open(file_duration, "w") as f:
         json.dump({"duration": duration_list}, f, ensure_ascii=False)
+
+    import jsonlines
+    with jsonlines.open(file_phonemes, "w") as f:
+        f.write_all(phoneme_aligned)
 
     new_vocal = ""
     if not ch_tokenizer:
@@ -1307,9 +1333,9 @@ def vocab_extend(project_name, symbols, model_type):
         f.write("\n".join(vocab))
 
     if model_type == "F5TTS_v1_Custom_Prune_14":
-        ckpt_path = "/mnt/data02/TTS/F5-TTS/Model_Pruning/pruned_models/pruned_baseV1.pt"
+        ckpt_path = "/home/steve/data02/TTS/F5-TTS/Model_Pruning/pruned_models/pruned_baseV1.pt"
     elif model_type == "F5TTS_v1_Custom_Prune_12":
-        ckpt_path = "/mnt/data01/TTS/F5-TTS/Model_Pruning/pruned_models/pruned_baseV1.pt"
+        ckpt_path = "/home/steve/data02/TTS/F5-TTS/Model_Pruning/pruned_models/pruned_baseV1.pt"
     elif model_type == "F5TTS_v1_Base":
         ckpt_path = str(cached_path("hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"))
     elif model_type == "F5TTS_Base":
@@ -1717,7 +1743,7 @@ Using the extended model, you can finetune to a new language that is missing sym
 
             exp_name_extend = gr.Radio(
                 label="Model", choices=["F5TTS_v1_Custom_Prune_12","F5TTS_v1_Custom_Prune_14",
-                                        "F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"], value="F5TTS_v1_Custom_Prune_14"
+                                        "F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"], value="F5TTS_v1_Custom_Prune_12"
             )
 
             with gr.Row():
@@ -2026,7 +2052,7 @@ Check the use_ema setting (True or False) for your model to see what works best 
 ```""")
             exp_name = gr.Radio(
                 label="Model", choices=["F5TTS_v1_Custom_Prune_12", "F5TTS_v1_Custom_Prune_14", 
-                                        "F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"], value="F5TTS_v1_Custom_Prune_14"
+                                        "F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"], value="F5TTS_v1_Custom_Prune_12"
             )
             list_checkpoints, checkpoint_select = get_checkpoints_project(projects_selelect, False)
 

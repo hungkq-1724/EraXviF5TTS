@@ -47,250 +47,203 @@ Requires-Dist: zhconv; extra == "eval"
 Requires-Dist: zhon; extra == "eval"
 Dynamic: license-file
 
-# F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
+<p align="left">
+  <img src="https://cdn-uploads.huggingface.co/production/uploads/63d8d8879dfcfa941d4d7cd9/GsQKdaTyn2FFx_cZvVHk3.png" alt="Logo">
+</p>
 
-[![python](https://img.shields.io/badge/Python-3.10-brightgreen)](https://github.com/SWivid/F5-TTS)
-[![arXiv](https://img.shields.io/badge/arXiv-2410.06885-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2410.06885)
-[![demo](https://img.shields.io/badge/GitHub-Demo%20page-orange.svg)](https://swivid.github.io/F5-TTS/)
-[![hfspace](https://img.shields.io/badge/🤗-Space%20demo-yellow)](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
-[![msspace](https://img.shields.io/badge/🤖-Space%20demo-blue)](https://modelscope.cn/studios/modelscope/E2-F5-TTS)
-[![lab](https://img.shields.io/badge/X--LANCE-Lab-grey?labelColor=lightgrey)](https://x-lance.sjtu.edu.cn/)
-[![lab](https://img.shields.io/badge/Peng%20Cheng-Lab-grey?labelColor=lightgrey)](https://www.pcl.ac.cn)
-<!-- <img src="https://github.com/user-attachments/assets/12d7749c-071a-427c-81bf-b87b91def670" alt="Watermark" style="width: 40px; height: auto"> -->
+# UPDATE:
 
-**F5-TTS**: Diffusion Transformer with ConvNeXt V2, faster trained and inference.
-
-**E2 TTS**: Flat-UNet Transformer, closest reproduction from [paper](https://arxiv.org/abs/2406.18009).
-
-**Sway Sampling**: Inference-time flow step sampling strategy, greatly improves performance
-
-### Thanks to all the contributors !
-
-## News
-- **2025/03/12**: 🔥 F5-TTS v1 base model with better training and inference performance. [Few demo](https://swivid.github.io/F5-TTS_updates).
-- **2024/10/08**: F5-TTS & E2 TTS base models on [🤗 Hugging Face](https://huggingface.co/SWivid/F5-TTS), [🤖 Model Scope](https://www.modelscope.cn/models/SWivid/F5-TTS_Emilia-ZH-EN), [🟣 Wisemodel](https://wisemodel.cn/models/SJTU_X-LANCE/F5-TTS_Emilia-ZH-EN).
-
-## Installation
-
-### Create a separate environment if needed
-
-```bash
-# Create a python 3.10 conda env (you could also use virtualenv)
-conda create -n f5-tts python=3.10
-conda activate f5-tts
+## Streaming
 ```
+# pip install fastapi uvicorn piper-tts langchain underthesea vinorm
+# Edit f5tts-fastapi-server.py and change model checkpoint, reference audio and reference text (as many as you like and name them well), then simply call:
 
-### Install PyTorch with matched device
-
-<details>
-<summary>NVIDIA GPU</summary>
-
-> ```bash
-> # Install pytorch with your CUDA version, e.g.
-> pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
-> ```
-
-</details>
-
-<details>
-<summary>AMD GPU</summary>
-
-> ```bash
-> # Install pytorch with your ROCm version (Linux only), e.g.
-> pip install torch==2.5.1+rocm6.2 torchaudio==2.5.1+rocm6.2 --extra-index-url https://download.pytorch.org/whl/rocm6.2
-> ```
-
-</details>
-
-<details>
-<summary>Intel GPU</summary>
-
-> ```bash
-> # Install pytorch with your XPU version, e.g.
-> # Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit must be installed
-> pip install torch torchaudio --index-url https://download.pytorch.org/whl/test/xpu
-> 
-> # Intel GPU support is also available through IPEX (Intel® Extension for PyTorch)
-> # IPEX does not require the Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit
-> # See: https://pytorch-extension.intel.com/installation?request=platform
-> ```
-
-</details>
-
-<details>
-<summary>Apple Silicon</summary>
-
-> ```bash
-> # Install the stable pytorch, e.g.
-> pip install torch torchaudio
-> ```
-
-</details>
-
-### Then you can choose one from below:
-
-> ### 1. As a pip package (if just for inference)
-> 
-> ```bash
-> pip install f5-tts
-> ```
-> 
-> ### 2. Local editable (if also do training, finetuning)
-> 
-> ```bash
-> git clone https://github.com/SWivid/F5-TTS.git
-> cd F5-TTS
-> # git submodule update --init --recursive  # (optional, if need > bigvgan)
-> pip install -e .
-> ```
-
-### Docker usage also available
-```bash
-# Build from Dockerfile
-docker build -t f5tts:v1 .
-
-# Run from GitHub Container Registry
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main
-
-# Quickstart if you want to just run the web interface (not CLI)
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main f5-tts_infer-gradio --host 0.0.0.0
+python f5tts-fastapi-server.py <-- check port inside this file
 ```
+From browser call the host/port and you are up and running.
 
+## Celebrating the 50th Anniversary of Reunification Day (April 30, 1975 - April 30, 2025): Highly enhanced source codes are released [(here)](https://github.com/EraX-AI/viF5TTS/tree/main/src) ✨✨✨
 
-## Inference
+## EraX-Smile-UnixSex-F5: Unisex is now available at https://huggingface.co/erax-ai/EraX-Smile-UnixSex-F5 ✨✨✨
 
-### 1. Gradio App
+---------------
+# EraX-Smile-Female-F5-V1.0: Giving F5-TTS a Vietnamese Twist (with Online Zero-Shot Voice Cloning!) ✨
 
-Currently supported features:
+Hey there, fellow Vietnamese AI explorers! 👋
 
-- Basic TTS with Chunk Inference
-- Multi-Style / Multi-Speaker Generation
-- Voice Chat powered by Qwen2.5-3B-Instruct
-- [Custom inference with more language support](src/f5_tts/infer/SHARED.md)
+We introduce **EraX-Smile-Female-F5-V1.0**, a Vietnamese text-to-speech model developed based on the F5-TTS architecture [arXiv:2410.06885](https://arxiv.org/abs/2410.06885).
+To adapt this model for Vietnamese, we utilized a substantial dataset combining over 800,000 samples, of which some are from public repositories and with an extensive 500-hour private dataset, for which we gratefully acknowledge obtaining usage rights. 
+The model underwent significant training, involving approximately 1 million update steps on a 4x RTX 3090 configuration. It tooks almost a week with some crashes and burns too 🔥
 
-```bash
-# Launch a Gradio app (web interface)
-f5-tts_infer-gradio
+Our hope is that EraX-Smile-Female-F5-V1.0 (soon UniSex) proves to be a useful contribution to the community for ethical and creative purposes.
 
-# Specify the port/host
-f5-tts_infer-gradio --port 7860 --host 0.0.0.0
+## Does it actually work? Let's listen! 🎧
 
-# Launch a share link
-f5-tts_infer-gradio --share
+Okay, moment of truth. Here's a sample voice we fed into the model (the "reference"):
+
+# EraX-Smile-Female-F5-V1.0
+
+## Reference Audio (< 15s) & Text
+**Reference Audio:** [Download and play reference audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/update_213000_ref.wav)
+
+**Reference Text:**
+> *"Thậm chí không ăn thì cũng có cảm giác rất là cứng bụng, chủ yếu là cái phần rốn...trở lên. Em có cảm giác khó thở, và ngủ cũng không ngon, thường bị ợ hơi rất là nhiều"*
+
+And here's our model trying its best to mimic that voice while reading completely different text. Fingers crossed! 🤞
+
+## Text to Generate
+> *"Trong khi đó, tại một chung cư trên địa bàn P.Vĩnh Tuy (Q.Hoàng Mai), nhiều người sống trên tầng cao giật mình khi thấy rung lắc mạnh nên đã chạy xuống sảnh tầng 1. Cư dân tại đây cho biết, họ chưa bao giờ cảm thấy ảnh hưởng của động đất mạnh như hôm nay"*
+
+**Generated Audio:** [Download and play generated audio](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/generated_429000.wav)
+
+## Attention: 
+Just a gentle observation regarding the selected reference audio – it seems there might be a **noticeable pause** within it. Please be aware that the zero-shot cloning process will likely replicate this characteristic in the synthesized output. If a more continuous flow without pauses is desired, you might consider using a reference recording that is clean and free of significant delays, unless reproducing the pause is intentional.
+
+## Audio Samples
+
+If you'd like to listen to the audio samples directly:
+
+1. **Reference Audio**: Download the [reference audio file](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/update_213000_ref.wav) and play it on your device.
+
+2. **Generated Audio**: Download the [generated audio file](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0/resolve/main/model/generated_429000.wav) and play it on your device.
+
+Alternatively, you can visit our [Hugging Face model page](https://huggingface.co/erax-ai/EraX-Smile-Female-F5-V1.0) to access and play these audio files directly.
+
+## Wanna try this magic (or madness) yourself? 🧙‍♂️
+
+Getting started is hopefully not *too* painful. After downloading this repo and cloning our GitHub, you can try something like this:
+
+```python
+# Ubuntu: sudo apt install ffmpeg
+# Windows please refer to https://www.geeksforgeeks.org/how-to-install-ffmpeg-on-windows/
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] =  "0" # Tell it which GPU to use (or ignore if you're CPU-bound and patient!)
+
+from vinorm import TTSnorm # Gotta normalize that Vietnamese text first
+from f5tts_wrapper import F5TTSWrapper # Our handy wrapper class
+
+# --- Config ---
+# Path to the model checkpoint you downloaded from *this* repo
+# MAKE SURE this path points to the actual .pth or .ckpt file!
+eraX_ckpt_path = "path/to/your/downloaded/EraX-Smile-Female-F5-V1.0/model.pth" # <-- CHANGE THIS!
+
+# Path to the voice you want to clone
+ref_audio_path = "path/to/your/reference_voice.wav" # <-- CHANGE THIS!
+
+# Path to the vocab file from this repo
+vocab_file = "path/to/your/downloaded/EraX-Smile-Female-F5-V1.0/vocab.txt" # <-- CHANGE THIS!
+
+# Where to save the generated sound
+output_dir = "output_audio"
+
+# --- Texts ---
+# Text matching the reference audio (helps the model learn the voice). Please make sure it match with the referrence audio!
+ref_text = "Thậm chí không ăn thì cũng có cảm giác rất là cứng bụng, chủ yếu là cái phần rốn...trở lên. Em có cảm giác khó thở, và ngủ cũng không ngon, thường bị ợ hơi rất là nhiều"
+
+# The text you want the cloned voice to speak
+text_to_generate = "Trong khi đó, tại một chung cư trên địa bàn P.Vĩnh Tuy (Q.Hoàng Mai), nhiều người sống trên tầng cao giật mình khi thấy rung lắc mạnh nên đã chạy xuống sảnh tầng 1. Cư dân tại đây cho biết, họ chưa bao giờ cảm thấy ảnh hưởng của động đất mạnh như hôm nay."
+
+# --- Let's Go! ---
+print("Initializing the TTS engine... (Might take a sec)")
+tts = F5TTSWrapper(
+    vocoder_name="vocos", # Using Vocos vocoder
+    ckpt_path=eraX_ckpt_path,
+    vocab_file=vocab_file,
+    use_ema=False, # ALWAYS False as we converted from .pt to safetensors and EMA (where there is or not) was in there
+)
+
+# Normalize the reference text (makes it easier for the model)
+ref_text_norm = TTSnorm(ref_text)
+
+# Prepare the output folder
+os.makedirs(output_dir, exist_ok=True)
+
+print("Processing the reference voice...")
+# Feed the model the reference voice ONCE
+# Provide ref_text for better quality, or set ref_text="" to use Whisper for auto-transcription (if installed)
+tts.preprocess_reference(
+    ref_audio_path=ref_audio_path,
+    ref_text=ref_text_norm,
+    clip_short=True # Keeps reference audio to a manageable length (~12s)
+)
+print(f"Reference audio duration used: {tts.get_current_audio_length():.2f} seconds")
+
+# --- Generate New Speech ---
+print("Generating new speech with the cloned voice...")
+
+# Normalize the text we want to speak
+text_norm = TTSnorm(text_to_generate)
+
+# You can generate multiple sentences easily
+# Just add more normalized strings to this list
+sentences = [text_norm]
+
+for i, sentence in enumerate(sentences):
+    output_path = os.path.join(output_dir, f"generated_speech_{i+1}.wav")
+
+    # THE ACTUAL GENERATION HAPPENS HERE!
+    tts.generate(
+        text=sentence,
+        output_path=output_path,
+        nfe_step=20,               # Denoising steps. More = slower but potentially better? (Default: 32)
+        cfg_strength=2.0,          # How strongly to stick to the reference voice style? (Default: 2.0)
+        speed=1.0,                 # Make it talk faster or slower (Default: 1.0)
+        cross_fade_duration=0.15,  # Smooths transitions if text is split into chunks (Default: 0.15)
+    )
+    print(f"Boom! Audio saved to: {output_path}")
+
+print("\nAll done! Check your output folder.")
 ```
+* For full Web interface and control with Gradio, please clone and use the original repository of [F5-TTS Github](https://github.com/SWivid/F5-TTS)
+* We use the cool library from [Vinorm Team](https://github.com/v-nhandt21/Vinorm) for Vietnamese text normalization.
 
-<details>
-<summary>NVIDIA device docker compose file example</summary>
+* **What's Next?** 🤔
+The EraX Team (that's us!) are always tinkering and trying to make things better (or at least, less broken!).
+We hope to bring more updates your way. Let us know what you think – feedback, bug reports, or even just saying hi is always welcome!
+- [ ] ⭐ Release checkpoints for Vietnamese male
+- [ ] 📝 Codes for real-time TTS streaming
+- [ ] 🔥 Release Piper-based model that can run on ...Rasberry Pi 4 🔥
 
-```yaml
-services:
-  f5-tts:
-    image: ghcr.io/swivid/f5-tts:main
-    ports:
-      - "7860:7860"
-    environment:
-      GRADIO_SERVER_PORT: 7860
-    entrypoint: ["f5-tts_infer-gradio", "--port", "7860", "--host", "0.0.0.0"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+⚠️ **Important Note on Responsible Use** ⚠️
+- Voice cloning technology is powerful and comes with significant ethical responsibilities.
+- Intended Use: This model is intended for creative purposes, accessibility tools, personal projects, and applications where consent is explicit and ethical considerations are prioritized.
+- **Prohibited Use**: We strongly condemn and strictly prohibit the use of this model for any malicious or unethical purposes, including but not limited to:
+  - Creating non-consensual deepfakes or impersonating individuals without permission.
+  - Generating misinformation, fraudulent content, or defamatory material.
+  - Harassment, abuse, or any form of criminal activity.
+- User Responsibility: By using this model, you agree to do so responsibly and ethically. You are solely responsible for the content you generate and ensuring it complies with all applicable laws and ethical standards. The creators (EraX Team) disavow any responsibility for misuse of this model.
 
-volumes:
-  f5-tts:
-    driver: local
-```
+  Please use this technology thoughtfully and ethically.
 
-</details>
+⚠️ **Lưu ý Quan trọng về Việc Sử dụng có Trách nhiệm** ⚠️
 
-### 2. CLI Inference
+- Sức mạnh và Trách nhiệm: Công nghệ nhân bản giọng nói sở hữu sức mạnh to lớn và đi kèm với những trách nhiệm đạo đức hết sức quan trọng.
+- Mục đích Sử dụng Dự kiến: Mô hình này được tạo ra nhằm phục vụ các mục đích sáng tạo, phát triển công cụ hỗ trợ tiếp cận, thực hiện dự án cá nhân và các ứng dụng khác nơi có sự đồng thuận rõ ràng từ các bên liên quan và các yếu tố đạo đức luôn được đặt lên hàng đầu.
+- Nghiêm cấm Sử dụng Sai trái: Chúng tôi cực lực lên án và nghiêm cấm tuyệt đối việc sử dụng mô hình này cho bất kỳ mục đích xấu xa, phi đạo đức nào, bao gồm nhưng không giới hạn ở:
+  - Tạo ra deepfake hoặc mạo danh người khác khi chưa được sự cho phép hoặc đồng thuận rõ ràng.
+  - Phát tán thông tin sai lệch, tạo nội dung lừa đảo hoặc các tài liệu mang tính phỉ báng, bôi nhọ.
+  - Thực hiện hành vi quấy rối, lạm dụng hoặc bất kỳ hoạt động tội phạm nào khác.
 
-```bash
-# Run with flags
-# Leave --ref_text "" will have ASR model transcribe (extra GPU memory usage)
-f5-tts_infer-cli --model F5TTS_v1_Base \
---ref_audio "provide_prompt_wav_path_here.wav" \
---ref_text "The content, subtitle or transcription of reference audio." \
---gen_text "Some text you want TTS model generate for you."
+- Trách nhiệm của Người dùng: Khi sử dụng mô hình này, bạn cam kết hành động một cách có trách nhiệm và tuân thủ các chuẩn mực đạo đức. Bạn phải chịu trách nhiệm hoàn toàn về nội dung do mình tạo ra và đảm bảo rằng nội dung đó tuân thủ mọi quy định pháp luật hiện hành và các tiêu chuẩn đạo đức. Đội ngũ phát triển (Nhóm EraX) hoàn toàn không chịu trách nhiệm cho bất kỳ hành vi lạm dụng nào đối với mô hình này.
 
-# Run with default setting. src/f5_tts/infer/examples/basic/basic.toml
-f5-tts_infer-cli
-# Or with your own .toml file
-f5-tts_infer-cli -c custom.toml
+  Lời kêu gọi: Xin hãy sử dụng công nghệ này một cách có suy xét, thận trọng và đạo đức.
 
-# Multi voice. See src/f5_tts/infer/README.md
-f5-tts_infer-cli -c src/f5_tts/infer/examples/multi/story.toml
-```
+**License Stuff** 📜
+We're keeping it simple with the MIT License, following in the footsteps of giants like Whisper. Use it, break it, hopefully make cool things with it!
 
-### 3. More instructions
+**Feeling Generous? (Citation)** 🙏
+Did this model actually help you? Or maybe just provide a moment's amusement? If so, a star ⭐ on our GitHub repo would totally make our day!
+Don't forget to like, share and star us on Github and HuggingFace!
+And if you're writing something fancy (like a research paper) and want to give us a nod, here's the bibtex snippet:
 
-- In order to have better generation results, take a moment to read [detailed guidance](src/f5_tts/infer).
-- The [Issues](https://github.com/SWivid/F5-TTS/issues?q=is%3Aissue) are very useful, please try to find the solution by properly searching the keywords of problem encountered. If no answer found, then feel free to open an issue.
-
-
-## Training
-
-### 1. With Hugging Face Accelerate
-
-Refer to [training & finetuning guidance](src/f5_tts/train) for best practice.
-
-### 2. With Gradio App
-
-```bash
-# Quick start with Gradio web interface
-f5-tts_finetune-gradio
-```
-
-Read [training & finetuning guidance](src/f5_tts/train) for more instructions.
-
-
-## [Evaluation](src/f5_tts/eval)
-
-
-## Development
-
-Use pre-commit to ensure code quality (will run linters and formatters automatically):
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-When making a pull request, before each commit, run: 
-
-```bash
-pre-commit run --all-files
-```
-
-Note: Some model components have linting exceptions for E722 to accommodate tensor notation.
-
-
-## Acknowledgements
-
-- [E2-TTS](https://arxiv.org/abs/2406.18009) brilliant work, simple and effective
-- [Emilia](https://arxiv.org/abs/2407.05361), [WenetSpeech4TTS](https://arxiv.org/abs/2406.05763), [LibriTTS](https://arxiv.org/abs/1904.02882), [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) valuable datasets
-- [lucidrains](https://github.com/lucidrains) initial CFM structure with also [bfs18](https://github.com/bfs18) for discussion
-- [SD3](https://arxiv.org/abs/2403.03206) & [Hugging Face diffusers](https://github.com/huggingface/diffusers) DiT and MMDiT code structure
-- [torchdiffeq](https://github.com/rtqichen/torchdiffeq) as ODE solver, [Vocos](https://huggingface.co/charactr/vocos-mel-24khz) and [BigVGAN](https://github.com/NVIDIA/BigVGAN) as vocoder
-- [FunASR](https://github.com/modelscope/FunASR), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [UniSpeech](https://github.com/microsoft/UniSpeech), [SpeechMOS](https://github.com/tarepan/SpeechMOS) for evaluation tools
-- [ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner) for speech edit test
-- [mrfakename](https://x.com/realmrfakename) huggingface space demo ~
-- [f5-tts-mlx](https://github.com/lucasnewman/f5-tts-mlx/tree/main) Implementation with MLX framework by [Lucas Newman](https://github.com/lucasnewman)
-- [F5-TTS-ONNX](https://github.com/DakeQQ/F5-TTS-ONNX) ONNX Runtime version by [DakeQQ](https://github.com/DakeQQ)
-
-## Citation
-If our work and codebase is useful for you, please cite as:
-```
-@article{chen-etal-2024-f5tts,
-      title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching}, 
-      author={Yushen Chen and Zhikang Niu and Ziyang Ma and Keqi Deng and Chunhui Wang and Jian Zhao and Kai Yu and Xie Chen},
-      journal={arXiv preprint arXiv:2410.06885},
-      year={2024},
+```bibtex
+@misc{EraXSmileF5_2024,
+  author       = {Nguyễn Anh Nguyên and The EraX Team},
+  title        = {EraX-Smile-Female-F5-V1.0: Người Việt sành tiếng Việt.},
+  year         = {2024},
+  publisher    = {Hugging Face},
+  journal      = {Hugging Face Model Hub},
+  howpublished = {\url{https://github.com/EraX-JS-Company/EraX-Smile-F5TTS}}
 }
 ```
-## License
-
-Our code is released under MIT License. The pre-trained models are licensed under the CC-BY-NC license due to the training data Emilia, which is an in-the-wild dataset. Sorry for any inconvenience this may cause.

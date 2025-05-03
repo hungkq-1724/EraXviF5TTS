@@ -14,7 +14,7 @@ from pydub import AudioSegment, silence
 from f5_tts.model import CFM
 from f5_tts.model.utils import (
     get_tokenizer,
-    convert_char_to_pinyin,
+    list_str_to_idx,
 )
 from f5_tts.infer.utils_infer import (
     chunk_text,
@@ -22,10 +22,6 @@ from f5_tts.infer.utils_infer import (
     transcribe,
     initialize_asr_pipeline,
 )
-
-# Add at the top with other imports
-from viphoneme import vi2IPA
-from typing import Dict, Optional
 
 class F5TTSWrapper:
     """
@@ -50,8 +46,8 @@ class F5TTSWrapper:
         n_fft: int = 1024,
         ode_method: str = "euler",
         use_ema: bool = True,
-        dur_predictor_ckpt: Optional[str] = None,  # Add this parameter
-        use_phoneme_durations: bool = True,  # Add this parameter
+        use_duration_predictor: bool = False,
+        duration_predictor_path: Optional[str] = None,
     ):
         """
         Initialize the F5-TTS wrapper with model configuration.
@@ -72,6 +68,8 @@ class F5TTSWrapper:
             n_fft: FFT size for the mel spectrogram
             ode_method: ODE method for sampling ("euler" or "midpoint")
             use_ema: Whether to use EMA weights from the checkpoint
+            use_duration_predictor: Whether to use the duration predictor for inference
+            duration_predictor_path: Path to separate duration predictor checkpoint
         """
         # Set device
         if device is None:
@@ -95,6 +93,10 @@ class F5TTSWrapper:
         # Sampling parameters
         self.ode_method = ode_method
         
+        # Duration predictor setting
+        self.use_duration_predictor = use_duration_predictor
+        self.phoneme_map = {}  # Initialize empty phoneme map
+        
         # Initialize ASR for transcription if needed
         initialize_asr_pipeline(device=self.device)
         
@@ -105,7 +107,10 @@ class F5TTSWrapper:
             ckpt_type = "safetensors"
             
             # Adjust for previous models
-            if model_name == "F5TTS_Base":
+            if model_name == "F5TTS_v1_Custom_Prune_12":
+                if vocoder_name == "vocos":
+                    ckpt_step = 1200000
+            elif model_name == "F5TTS_Base":
                 if vocoder_name == "vocos":
                     ckpt_step = 1200000
                 elif vocoder_name == "bigvgan":
@@ -114,11 +119,18 @@ class F5TTSWrapper:
             elif model_name == "E2TTS_Base":
                 repo_name = "E2-TTS"
                 ckpt_step = 1200000
+            else:
+                 if vocoder_name == "vocos":
+                    ckpt_step = 1200000
                 
             ckpt_path = str(cached_path(f"hf://SWivid/{repo_name}/{model_name}/model_{ckpt_step}.{ckpt_type}"))
         
         # Load model configuration
-        config_path = str(files("f5_tts").joinpath(f"configs/{model_name}.yaml"))
+        if "custom" not in model_name.lower(): 
+            config_path = str(files("f5_tts").joinpath(f"configs/{model_name}.yaml"))
+        else:
+             config_path = model_name
+            
         model_cfg = OmegaConf.load(config_path)
         model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
         model_arc = model_cfg.model.arch
@@ -150,6 +162,73 @@ class F5TTSWrapper:
         dtype = torch.float32 if vocoder_name == "bigvgan" else None
         self._load_checkpoint(self.model, ckpt_path, dtype=dtype, use_ema=use_ema)
         
+        # Check for existing duration predictor in the model
+        self.has_duration_predictor = hasattr(self.model, 'duration_predictor') and self.model.duration_predictor is not None
+        
+        # Load external duration predictor if requested and not already in model
+        if use_duration_predictor and not self.has_duration_predictor and duration_predictor_path:
+            try:
+                from f5_tts.model import DurationPredictor
+                
+                print(f"Loading separate duration predictor from {duration_predictor_path}")
+                # Load the checkpoint
+                if duration_predictor_path.endswith(".safetensors"):
+                    from safetensors.torch import load_file
+                    checkpoint = load_file(duration_predictor_path, device=self.device)
+                else:
+                    checkpoint = torch.load(duration_predictor_path, map_location=self.device)
+                
+                # Get the state_dict based on checkpoint structure
+                if 'duration_predictor' in checkpoint:
+                    duration_state_dict = checkpoint['duration_predictor']
+                elif 'model_state_dict' in checkpoint and 'duration_predictor' in checkpoint['model_state_dict']:
+                    # Extract from model state dict
+                    duration_state_dict = {
+                        k.replace('duration_predictor.', ''): v 
+                        for k, v in checkpoint['model_state_dict'].items() 
+                        if k.startswith('duration_predictor.')
+                    }
+                else:
+                    # Assume the entire checkpoint is the duration predictor
+                    duration_state_dict = checkpoint
+                
+                # Create the duration predictor with correct vocab size
+                self.duration_predictor = DurationPredictor(vocab_size, 512, 32, 3, 0.5).to(self.device)
+                
+                # Load weights
+                incompatible = self.duration_predictor.load_state_dict(duration_state_dict, strict=False)
+                if incompatible.missing_keys:
+                    print(f"Warning: Missing keys in duration predictor: {incompatible.missing_keys}")
+                if incompatible.unexpected_keys:
+                    print(f"Warning: Unexpected keys in duration predictor: {incompatible.unexpected_keys}")
+                
+                # Set to eval mode
+                self.duration_predictor.eval()
+                
+                # Store the phoneme map if it exists in the checkpoint
+                if 'phoneme_map' in checkpoint:
+                    self.phoneme_map = checkpoint['phoneme_map']
+                    print(f"Loaded phoneme map with {len(self.phoneme_map)} phonemes")
+                
+                # Attach to model
+                setattr(self.model, 'duration_predictor', self.duration_predictor)
+                self.has_duration_predictor = True
+                
+                print("Duration predictor loaded successfully")
+            except Exception as e:
+                print(f"Error loading duration predictor: {e}")
+                import traceback
+                traceback.print_exc()
+                self.has_duration_predictor = False
+        
+        # Update status based on any changes
+        if use_duration_predictor and not self.has_duration_predictor:
+            print("Warning: Duration predictor requested but not available. Using fallback duration calculation.")
+            self.use_duration_predictor = False
+        elif self.has_duration_predictor:
+            print("Duration predictor found and will be used for inference.")
+            self.use_duration_predictor = True
+        
         # Load vocoder
         if vocoder_path is None:
             if vocoder_name == "vocos":
@@ -178,49 +257,8 @@ class F5TTSWrapper:
         self.sway_sampling_coef = -1.0
         self.speed = 1.0
         self.fix_duration = None
-
-        self.use_phoneme_durations = use_phoneme_durations
-        self.phoneme_map = {}  # Will be populated during use
         
-        # Load duration predictor checkpoint if provided
-        self.dur_predictor_loaded = False
-        if dur_predictor_ckpt is not None and hasattr(self.model, 'duration_predictor'):
-            try:
-                duration_checkpoint = torch.load(dur_predictor_ckpt, map_location=self.device)
-                if 'duration_predictor' in duration_checkpoint:
-                    self.model.duration_predictor.load_state_dict(duration_checkpoint['duration_predictor'])
-                    print(f"Loaded duration predictor from {dur_predictor_ckpt}")
-                    self.dur_predictor_loaded = True
-            except Exception as e:
-                print(f"Warning: Failed to load duration predictor checkpoint: {e}")
-                
-    def _phoneme_to_indices(self, phoneme_seq):
-        """Convert phoneme sequence to indices with dynamic mapping"""
-        # Update phoneme map with new phonemes
-        for p in phoneme_seq:
-            if p not in self.phoneme_map:
-                self.phoneme_map[p] = len(self.phoneme_map) + 1
-        
-        # Convert to indices
-        return [self.phoneme_map.get(p, 0) for p in phoneme_seq]
-        
-    def _adapt_duration_predictor_for_phonemes(self):
-        """Adapt the duration predictor to work with phonemes if needed"""
-        if not hasattr(self.model.duration_predictor, 'text_embed_phoneme'):
-            # Save original embedding
-            self.model.duration_predictor.text_embed_original = self.model.duration_predictor.text_embed
-            
-            # Create new embedding for phonemes
-            max_phonemes = 1000  # A generous upper limit for phonemes
-            embed_dim = self.model.duration_predictor.text_embed.embedding_dim
-            self.model.duration_predictor.text_embed_phoneme = torch.nn.Embedding(
-                max_phonemes, embed_dim, device=self.device
-            )
-            
-            # Add a flag to check which embedding to use
-            self.model.duration_predictor.using_phonemes = False
-        
-        def _load_checkpoint(self, model, ckpt_path, dtype=None, use_ema=True):
+    def _load_checkpoint(self, model, ckpt_path, dtype=None, use_ema=True):
         """
         Load model checkpoint with proper handling of different checkpoint formats.
         
@@ -264,11 +302,11 @@ class F5TTSWrapper:
                 if key in checkpoint["model_state_dict"]:
                     del checkpoint["model_state_dict"][key]
 
-            model.load_state_dict(checkpoint["model_state_dict"])
+            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         else:
             if ckpt_type == "safetensors":
                 checkpoint = {"model_state_dict": checkpoint}
-            model.load_state_dict(checkpoint["model_state_dict"])
+            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
         del checkpoint
         torch.cuda.empty_cache()
@@ -400,6 +438,87 @@ class F5TTSWrapper:
 
         return trimmed_audio
     
+    def calculate_duration_with_predictor(self, text_input, local_speed=1.0):
+        """
+        Calculate duration using the model's duration predictor with phonemizer.
+        
+        Args:
+            text_input: Text input string or token sequence
+            local_speed: Speed factor for duration
+            
+        Returns:
+            Predicted duration in frames
+        """
+        if not self.has_duration_predictor:
+            raise ValueError("Duration predictor not available")
+        
+        from f5_tts.model.utils import list_str_to_idx
+        from f5_tts.model.alignment_utils import text_to_phonemes_espeak, phoneme_to_indices
+        
+        try:
+            # Step 1: Convert text to phonemes using phonemizer from alignment_utils
+            phoneme_seq = text_to_phonemes_espeak(text_input)
+            
+            # Step 2: Convert phonemes to indices using the stored phoneme map
+            phoneme_indices_list, updated_map = phoneme_to_indices(phoneme_seq, phoneme_map=self.phoneme_map)
+            
+            # Update phoneme map if new phonemes were found
+            if len(updated_map) > len(self.phoneme_map):
+                self.phoneme_map = updated_map
+                print(f"Updated phoneme map to {len(self.phoneme_map)} phonemes")
+            
+            # Step 3: Create tensor with proper padding and mask
+            max_nt = max(len(seq) for seq in phoneme_indices_list)
+            b = len(phoneme_indices_list)
+            
+            phoneme_tensor = torch.zeros(b, max_nt, dtype=torch.long, device=self.device)
+            phoneme_mask = torch.zeros(b, max_nt, dtype=torch.bool, device=self.device)
+            
+            for i, seq in enumerate(phoneme_indices_list):
+                L = len(seq)
+                phoneme_tensor[i, :L] = torch.tensor(seq, device=self.device)
+                phoneme_mask[i, :L] = True
+                
+            # Step 4: Get duration predictions
+            with torch.inference_mode():
+                # Use phoneme_forward if available, otherwise use standard forward
+                if hasattr(self.model.duration_predictor, 'phoneme_forward'):
+                    log_durations = self.model.duration_predictor.phoneme_forward(
+                        phoneme_tensor, phoneme_mask)
+                else:
+                    log_durations = self.model.duration_predictor(
+                        phoneme_tensor, phoneme_mask)
+                    
+                # Calculate total frames
+                if log_durations.dim() == 3 and log_durations.size(1) == 1:
+                    log_durations = log_durations.squeeze(1)
+                    
+                # Sum up durations across all tokens (dim=1)
+                durations = torch.exp(torch.clamp(log_durations, -20, 20)).sum(dim=1)
+                
+            # Step 5: Calculate final duration with reference offset and speed adjustment
+            duration = self.ref_audio_len + int(durations[0].item() / local_speed)
+            
+            print(f"Duration predictor calculated {int(durations[0].item())} frames for text portion")
+            return duration
+            
+        except Exception as e:
+            print(f"Error in duration prediction: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback to approximate calculation
+            if isinstance(text_input, str):
+                text_len = len(text_input.encode("utf-8")) 
+            else:
+                text_len = sum(len(str(t).encode("utf-8")) for t in text_input)
+                
+            ref_text_len = len(self.ref_text.encode("utf-8"))
+            duration = self.ref_audio_len + int(self.ref_audio_len / ref_text_len * text_len / local_speed)
+            
+            print(f"Falling back to text ratio duration: {duration} frames")
+            return duration
+            
     def generate(
         self, 
         text: str,
@@ -426,7 +545,7 @@ class F5TTSWrapper:
             speed: Speed of generated audio
             fix_duration: Fixed duration in seconds
             cross_fade_duration: Duration of cross-fade between segments
-            use_duration_predictor: Whether to use duration predictor (if available)
+            use_duration_predictor: Override default setting for using duration predictor
             return_numpy: If True, returns the audio as a numpy array
             return_spectrogram: If True, also returns the spectrogram
             
@@ -445,13 +564,10 @@ class F5TTSWrapper:
         speed = speed if speed is not None else self.speed
         fix_duration = fix_duration if fix_duration is not None else self.fix_duration
         cross_fade_duration = cross_fade_duration if cross_fade_duration is not None else self.cross_fade_duration
+        use_predictor = use_duration_predictor if use_duration_predictor is not None else self.use_duration_predictor
         
         # Check if we can use the duration predictor
-        can_use_predictor = (
-            (use_duration_predictor if use_duration_predictor is not None else getattr(self, 'use_phoneme_durations', False)) and 
-            hasattr(self.model, 'duration_predictor') and
-            getattr(self, 'dur_predictor_loaded', False)
-        )
+        can_use_predictor = use_predictor and self.has_duration_predictor
         
         # Split the input text into batches
         audio_len = self.ref_audio_processed.shape[-1] / self.target_sample_rate
@@ -472,9 +588,9 @@ class F5TTSWrapper:
             if len(text_batch.encode("utf-8")) < 10:
                 local_speed = 0.3
                 
-            # Prepare the text
+            # Prepare the text - we're using char tokenizer, so NO pinyin conversion
             text_list = [self.ref_text + text_batch]
-            final_text_list = convert_char_to_pinyin(text_list)
+            final_text_list = text_list  # No conversion needed for Vietnamese
             
             # Calculate duration
             if fix_duration is not None:
@@ -482,71 +598,16 @@ class F5TTSWrapper:
                 duration = int(fix_duration * self.target_sample_rate / self.hop_length)
                 print(f"Using fixed duration: {fix_duration}s ({duration} frames)")
             elif can_use_predictor:
-                # Get phoneme-based duration prediction
-                try:
-                    # Import viphoneme if not already imported
-                    if not hasattr(self, '_phoneme_to_indices'):
-                        from viphoneme import vi2IPA
-                        
-                        # Add helper method dynamically
-                        def _phoneme_to_indices(self, phoneme_seq):
-                            """Convert phoneme sequence to indices with dynamic mapping"""
-                            # Initialize phoneme map if it doesn't exist
-                            if not hasattr(self, 'phoneme_map'):
-                                self.phoneme_map = {}
-                                
-                            # Update phoneme map with new phonemes
-                            for p in phoneme_seq:
-                                if p not in self.phoneme_map:
-                                    self.phoneme_map[p] = len(self.phoneme_map) + 1
-                            
-                            # Convert to indices
-                            return [self.phoneme_map.get(p, 0) for p in phoneme_seq]
-                        
-                        # Bind the method to the class
-                        import types
-                        self._phoneme_to_indices = types.MethodType(_phoneme_to_indices, self)
-                    
-                    # Convert text to phonemes
-                    phoneme_seq = vi2IPA(text_batch)
-                    print(f"Phoneme sequence: {phoneme_seq}")
-                    
-                    # Convert phonemes to indices
-                    phoneme_indices = self._phoneme_to_indices(phoneme_seq)
-                    phoneme_indices_tensor = torch.tensor([phoneme_indices], dtype=torch.long, device=self.device)
-                    
-                    # Create phoneme mask
-                    phoneme_mask = torch.ones_like(phoneme_indices_tensor).int()
-                    
-                    # Get duration prediction from duration predictor
-                    with torch.no_grad():
-                        log_durations = self.model.duration_predictor(phoneme_indices_tensor, phoneme_mask)
-                        durations = torch.exp(log_durations).round().int()
-                        total_duration = durations.sum().item()
-                    
-                    # Apply speed factor
-                    scaled_duration = int(total_duration / local_speed)
-                    
-                    # Add reference audio length
-                    duration = self.ref_audio_len + scaled_duration
-                    print(f"Duration from predictor: {duration} frames (speed factor: {local_speed})")
-                except Exception as e:
-                    print(f"Error in phoneme duration prediction: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                    # Fallback to ratio-based calculation
-                    ref_text_len = len(self.ref_text.encode("utf-8"))
-                    gen_text_len = len(text_batch.encode("utf-8"))
-                    duration = self.ref_audio_len + int(self.ref_audio_len / ref_text_len * gen_text_len / local_speed)
-                    print(f"Fallback to ratio-based duration: {duration} frames")
+                # Use duration predictor for Vietnamese text
+                duration = self.calculate_duration_with_predictor(text_batch, local_speed)
+                print(f"Duration predictor output: {duration} frames")
             else:
                 # Calculate duration based on text length ratio (fallback method)
                 ref_text_len = len(self.ref_text.encode("utf-8"))
                 gen_text_len = len(text_batch.encode("utf-8"))
                 duration = self.ref_audio_len + int(self.ref_audio_len / ref_text_len * gen_text_len / local_speed)
-                print(f"Using ratio-based duration: {duration} frames")
-            
+                print(f"Calculated duration based on text ratio: {duration} frames")
+                
             # Generate audio
             with torch.inference_mode():
                 generated, _ = self.model.sample(
@@ -650,7 +711,6 @@ class F5TTSWrapper:
         else:
             raise RuntimeError("No audio generated")
             
-    
     def _save_spectrogram(self, spectrogram, path):
         """Save spectrogram as image"""
         import matplotlib.pyplot as plt
