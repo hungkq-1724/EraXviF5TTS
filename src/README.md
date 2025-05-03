@@ -2,7 +2,7 @@
   <img src="https://cdn-uploads.huggingface.co/production/uploads/63d8d8879dfcfa941d4d7cd9/GsQKdaTyn2FFx_cZvVHk3.png" alt="Logo">
 </p>
 
-# Update 3rd May 2025: revamp entire duratiob prediction training with phonemes instead of text-tokens.
+# Updated May 3, 2025: Complete overhaul of training methodology with phoneme-based duration prediction for superior speech quality
 
 # Introduce an Highly Enhanced F5-TTS fully open source.
 
@@ -15,8 +15,6 @@ This repository is a significantly enhanced fork of the original F5-TTS project.
 I'll rewrite that specific section of your document in a more professional style for a model card. Here's a polished English version:
 
 ## Advanced Training Strategy with Phoneme-Based Duration Prediction
-
-*Updated May 3, 2025: Complete overhaul of training methodology with phoneme-based duration prediction for superior speech quality*
 
 Our implementation fundamentally improves upon the original F5-TTS architecture by introducing a phoneme-level duration predictor that significantly enhances naturalness and articulation clarity.
 
