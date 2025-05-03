@@ -75,7 +75,7 @@ accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
   --use_duration_predictor \
   --duration_loss_weight 0.5 \
   --epochs 300 \
-  --num_warmup_updates 10000 \
+  --num_warmup_updates 32000 \
   --save_per_updates 3000 \
   --keep_last_n_checkpoints 50 \
   --last_per_updates 3000 \
