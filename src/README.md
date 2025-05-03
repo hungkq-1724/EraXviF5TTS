@@ -58,7 +58,7 @@ Our training strategy implements a two-phase process:
    - The duration predictor is saved as a separate model component for portability
    - This allows for flexible reuse across different model configurations
 
-### Example Training Configuration
+### Example Training Configuration with 1.2 million/female-only samples
 
 ```bash
 accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
