@@ -58,7 +58,7 @@ Our training strategy implements a two-phase process:
    - The duration predictor is saved as a separate model component for portability
    - This allows for flexible reuse across different model configurations
 
-### Example Training Configuration with 1.2 million/female-only samples w/ only 2xRTX3090 24G GPUs.
+### Example Training Configuration with 1.2 million/female-only samples w/ only 2xRTX3090 24G GPUs. The model was pruned from 22 to 12 layers and then trained from scratch.
 
 ```bash
 accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
