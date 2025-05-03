@@ -2,6 +2,8 @@
   <img src="https://cdn-uploads.huggingface.co/production/uploads/63d8d8879dfcfa941d4d7cd9/GsQKdaTyn2FFx_cZvVHk3.png" alt="Logo">
 </p>
 
+# Update 3rd May 2025: revamp entire duratiob prediction training with phonemes instead of text-tokens.
+
 # Introduce an Highly Enhanced F5-TTS fully open source.
 
 **MIT license** for everything except if you use the **pretrained F5-TTS model**, then you are bound with Emilia dataset which is under **BY-NC 4.0 license**. 
