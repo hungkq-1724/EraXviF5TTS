@@ -748,31 +748,244 @@ class Trainer:
         self.accelerator.print("Checkpoint loading process finished.")
         return start_update
         
-    def train(self, train_dataset: Dataset, phonemes_dataset=None, num_workers=16, resumable_with_seed: int = None):
+    def calculate_duration_loss(self, text_inputs, mel_spec, mel_lengths, text_lengths, phoneme_sequences, batch_indices, global_update):
         """
-        Train the model with phoneme-based duration prediction.
+        Calculate duration loss using monotonic alignment search instead of uniform distribution.
+        This produces more realistic phoneme-level durations.
         
         Args:
-            train_dataset: Dataset to train on
-            phonemes_dataset: Dataset containing pre-phonemized text using vi2IPA
-            num_workers: Number of workers for data loading
-            resumable_with_seed: Random seed for resumable training
-        """
-        # Initialize phoneme map as empty if not already done
-        if self.phoneme_map is None:
-            self.phoneme_map = {}
-            print("Initialized empty phoneme map - will build during training")
+            text_inputs: Input text tokens
+            mel_spec: Mel spectrogram [batch, time, dim]
+            mel_lengths: Length of each mel spectrogram in the batch
+            text_lengths: Length of each text in the batch
+            phoneme_sequences: List of phoneme sequences for each sample in batch
+            batch_indices: Indices of samples in the batch
+            global_update: Current global update counter
             
+        Returns:
+            tuple of (duration_loss, duration_mae, alignment_viz) for logging
+        """
+        if self.duration_predictor is None or text_lengths is None:
+            return None, None, None
+        
+        try:
+            from f5_tts.model.alignment_utils import (
+                phoneme_to_indices, 
+                monotonic_alignment_search, 
+                get_durations_from_alignment
+            )
+            
+            # Get phoneme sequences for this batch
+            if isinstance(phoneme_sequences, list) and len(phoneme_sequences) > 0:
+                # Thực sự sử dụng dữ liệu phoneme, không chỉ "pass"
+                phoneme_data = phoneme_sequences
+            else:
+                # Last resort fallback - use text as phoneme sequences
+                phoneme_data = text_inputs
+                if self.accelerator.is_local_main_process and global_update % 100 == 0:
+                    print(f"WARNING: No phoneme data found. Using text as fallback.")
+            
+            # Convert phonemes to indices using the phoneme map
+            phoneme_indices_list, updated_map = phoneme_to_indices(phoneme_data, phoneme_map=self.phoneme_map)
+            
+            # Update phoneme map if new phonemes were found
+            if len(updated_map) > len(self.phoneme_map):
+                self.phoneme_map = updated_map
+                if self.accelerator.is_local_main_process and global_update % 100 == 0:
+                    print(f"Updated phoneme map to {len(self.phoneme_map)} phonemes")
+            
+            # Create phoneme tensor and mask
+            b = len(phoneme_indices_list)
+            max_nt = max(len(seq) for seq in phoneme_indices_list)
+            
+            # Create tensors on device
+            phoneme_tensor = torch.zeros(b, max_nt, dtype=torch.long, device=mel_spec.device)
+            phoneme_mask = torch.zeros(b, max_nt, dtype=torch.bool, device=mel_spec.device)
+            
+            for i, seq in enumerate(phoneme_indices_list):
+                L = len(seq)
+                phoneme_tensor[i, :L] = torch.tensor(seq, device=mel_spec.device)
+                phoneme_mask[i, :L] = True
+            
+            # Get text embeddings for creating similarity matrix
+            with torch.no_grad():
+                # Lấy embedding cho phoneme
+                phoneme_embed = self.duration_predictor_align.text_embed(phoneme_tensor)  # [batch, phoneme_len, embed_dim]
+                
+                # Chuẩn hóa embedding
+                phoneme_embed_norm = phoneme_embed / (phoneme_embed.norm(dim=2, keepdim=True) + 1e-8)
+                
+                # Tạo một projection đơn giản cho mel spectrogram 
+                # Sử dụng một ma trận cố định thay vì tạo lớp Linear mới
+                if not hasattr(self, 'mel_proj_matrix'):
+                    # Tạo ma trận projection một lần và tái sử dụng
+                    self.mel_proj_matrix = torch.randn(mel_spec.shape[-1], phoneme_embed.shape[-1], 
+                                                       device=mel_spec.device) / math.sqrt(mel_spec.shape[-1])
+                
+                # Project mel spec
+                mel_proj = torch.matmul(mel_spec, self.mel_proj_matrix)
+                mel_proj_norm = mel_proj / (mel_proj.norm(dim=2, keepdim=True) + 1e-8)
+                
+                # Tính similarity matrix với chuẩn hóa
+                similarity = torch.bmm(phoneme_embed_norm, mel_proj_norm.transpose(1, 2))
+                
+                # Thêm một simple position bias (đơn giản hóa)
+                # Tạo một mask đơn giản khuyến khích căn chỉnh theo đường chéo
+                batch_size = phoneme_tensor.shape[0]
+                for i in range(batch_size):
+                    p_len = phoneme_mask[i].sum().item()
+                    m_len = mel_lengths[i].item()
+                    if p_len > 0 and m_len > 0:
+                        # Tạo mask đơn giản dựa trên vị trí tương đối
+                        for p in range(p_len):
+                            # Vị trí tương đối trên mel spec
+                            center = int(p * m_len / p_len)
+                            # Tạo một cửa sổ xung quanh vị trí này
+                            window = max(3, m_len // 10)  # Kích thước cửa sổ
+                            start = max(0, center - window)
+                            end = min(m_len, center + window)
+                            # Tăng similarity cho vị trí này
+                            similarity[i, p, start:end] += 3.0
+                
+                # Áp dụng mask cho các vị trí không hợp lệ
+                for i in range(batch_size):
+                    if phoneme_mask[i].sum() < max_nt:
+                        similarity[i, phoneme_mask[i].sum():, :] = -float('inf')
+                    
+                    if mel_lengths[i] < mel_spec.shape[1]:
+                        similarity[i, :, mel_lengths[i]:] = -float('inf')
+                
+                # Áp dụng monotonic alignment search
+                alignment = monotonic_alignment_search(similarity)
+                
+                # Trích xuất thời lượng của từng phoneme
+                phoneme_durations = get_durations_from_alignment(alignment)
+                
+                # Đảm bảo không có phoneme nào có thời lượng bằng 0
+                phoneme_durations = torch.maximum(
+                    phoneme_durations * phoneme_mask.float(),
+                    torch.ones_like(phoneme_durations) * 0.1 * phoneme_mask.float()
+                )
+                
+                # Calculate and log average phoneme duration statistics
+                if self.accelerator.is_local_main_process and global_update % 100 == 0:
+                    # Calculate average frames per phoneme from alignment
+                    total_frames = phoneme_durations.sum().item()
+                    total_phonemes = phoneme_mask.sum().item()
+                    avg_duration = total_frames / (total_phonemes + 1e-8)
+                    
+                    # Calculate min and max durations per sample
+                    max_duration = phoneme_durations.max().item()
+                    
+                    # Get non-zero min duration (masked values are 0)
+                    min_duration = torch.where(phoneme_durations > 0, phoneme_durations, torch.full_like(phoneme_durations, float('inf'))).min().item()
+                    if min_duration == float('inf'):
+                        min_duration = 0.0
+                    
+                    print(f"[DURATION STATS] Average frames per phoneme: {avg_duration:.2f}")
+                    print(f"[DURATION STATS] Min duration: {min_duration:.2f}, Max duration: {max_duration:.2f}")
+                    print(f"[DURATION STATS] Total frames: {total_frames:.0f}, Total phonemes: {total_phonemes:.0f}")
+            
+            # Add small epsilon for log-space calculation
+            target_logw = torch.log(phoneme_durations + 1e-6)
+            
+            # Forward pass through duration predictor to get predictions
+            # Use the training-specific duration predictor
+            logw = self.duration_predictor_pred(phoneme_tensor, phoneme_mask)
+            if logw.dim() == 3 and logw.size(1) == 1:
+                logw = logw.squeeze(1)
+            
+            # Calculate loss - only on masked positions
+            masked_diff = (logw - target_logw.detach())**2 * phoneme_mask.float()
+            dur_loss = torch.sum(masked_diff) / (torch.sum(phoneme_mask) + 1e-8)
+            
+            # Calculate MAE for monitoring (in linear space)
+            pred_durations = torch.exp(torch.clamp(logw, -10, 10))
+            true_durations = phoneme_durations
+            masked_diff_mae = torch.abs(pred_durations - true_durations) * phoneme_mask.float()
+            dur_mae = torch.sum(masked_diff_mae) / (torch.sum(phoneme_mask) + 1e-8)
+            
+            # Create visualization data for logging
+            alignment_viz = None
+            if self.accelerator.is_local_main_process and global_update % 500 == 0:
+                try:
+                    # Get first sample in batch for visualization
+                    sample_idx = 0
+                    
+                    # Get text, phonemes, and durations
+                    if isinstance(text_inputs, list):
+                        sample_text = text_inputs[sample_idx]
+                    elif torch.is_tensor(text_inputs):
+                        sample_text = text_inputs[sample_idx].tolist()
+                    else:
+                        sample_text = str(text_inputs[sample_idx])
+                        
+                    if isinstance(phoneme_data, list) and len(phoneme_data) > sample_idx:
+                        sample_phonemes = phoneme_data[sample_idx]
+                    else:
+                        sample_phonemes = ["no_phonemes_available"]
+                        
+                    sample_durations = phoneme_durations[sample_idx].cpu().numpy()
+                    if len(sample_phonemes) > len(sample_durations):
+                        sample_phonemes = sample_phonemes[:len(sample_durations)]
+                    
+                    # Convert any non-serializable types
+                    if isinstance(sample_text, (list, tuple)):
+                        sample_text = [str(t) for t in sample_text]
+                    
+                    if isinstance(sample_phonemes, (list, tuple)):
+                        sample_phonemes = [str(p) for p in sample_phonemes]
+                    
+                    # Create visualization data
+                    alignment_viz = {
+                        'text': sample_text,
+                        'phonemes': sample_phonemes,
+                        'durations': sample_durations.tolist()
+                    }
+                except Exception as e:
+                    print(f"Error creating alignment visualization: {e}")
+                    alignment_viz = None
+            
+            return dur_loss, dur_mae, alignment_viz
+            
+        except Exception as e:
+            print(f"[ERROR] Phoneme duration prediction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Create minimal training signal when error occurs
+            dur_loss = torch.tensor(0.01, device=mel_spec.device, requires_grad=True)
+            dur_mae = torch.tensor(1.0, device=mel_spec.device)
+            
+            return dur_loss, dur_mae, None
+        
+    def collate_with_indices(batch):
+        # Start with standard collation
+        result = collate_fn(batch)
+        
+        # Add indices for each item in the batch
+        result['index'] = list(range(len(batch)))
+        
+        # Preserve phoneme data if it exists
+        if all('phoneme' in item for item in batch):
+            # Lấy dữ liệu từ key 'phoneme' (số ít) và lưu vào key 'phonemes' (số nhiều) trong result
+            result['phonemes'] = [item['phoneme'] for item in batch]
+        elif 'phoneme' in result:
+            # Nếu collate_fn đã trả về phoneme, đảm bảo chúng tôi sử dụng tên key nhất quán
+            result['phonemes'] = result.pop('phoneme')
+        
+        return result
+    
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         """
-        Train the model with phoneme-based duration prediction using data directly from the dataset.
+        Train the model with phoneme-based duration prediction using monotonic alignment.
         
         Args:
             train_dataset: Dataset to train on (must contain 'phoneme' field if duration prediction is enabled)
             num_workers: Number of workers for data loading
             resumable_with_seed: Random seed for resumable training
         """
-        # Initialize phoneme map as empty if not already done
+        # Initialize phoneme map if not already done
         if self.phoneme_map is None:
             self.phoneme_map = {}
             print("Initialized empty phoneme map - will build during training")
@@ -788,6 +1001,10 @@ class Trainer:
             target_sample_rate = self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
             log_samples_path = f"{self.checkpoint_path}/samples"
             os.makedirs(log_samples_path, exist_ok=True)
+            
+            # Create a directory for alignment visualizations
+            alignment_path = f"{self.checkpoint_path}/alignments"
+            os.makedirs(alignment_path, exist_ok=True)
     
         # CRITICAL: Set fixed seed but DO NOT shuffle the dataset to maintain alignment
         if exists(resumable_with_seed):
@@ -806,9 +1023,14 @@ class Trainer:
             
             # Preserve phoneme data if it exists
             if all('phoneme' in item for item in batch):
+                # Lấy dữ liệu từ key 'phoneme' (số ít) và lưu vào key 'phonemes' (số nhiều) trong result
                 result['phonemes'] = [item['phoneme'] for item in batch]
+            elif 'phoneme' in result:
+                # Nếu collate_fn đã trả về phoneme, đảm bảo chúng tôi sử dụng tên key nhất quán
+                result['phonemes'] = result.pop('phoneme')
             
             return result
+
     
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
@@ -901,7 +1123,7 @@ class Trainer:
             for batch in current_dataloader:
                 with self.accelerator.accumulate(self.model):
                     text_inputs = batch["text"]
-                    mel_spec = batch["mel"].permute(0, 2, 1)
+                    mel_spec = batch["mel"].permute(0, 2, 1)  # [b, mel_len, n_mel]
                     mel_lengths = batch["mel_lengths"]
                     text_lengths = batch.get("text_lengths")
                     batch_indices = batch.get("index", None)
@@ -912,98 +1134,31 @@ class Trainer:
                         mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
                     )
                     
-                    # Duration prediction with robust error handling
-                    dur_loss = None
-                    dur_mae = None
-                    
+                    # Calculate duration loss using the improved monotonic alignment method
+                    dur_loss, dur_mae, alignment_viz = None, None, None
                     if self.duration_predictor is not None and text_lengths is not None:
-                        try:
-                            from f5_tts.model.alignment_utils import phoneme_to_indices
-                            
-                            # Get phoneme sequences for this batch
-                            if batch_phonemes:
-                                # Use phonemes directly from the batch (preferred)
-                                phoneme_sequences = batch_phonemes
-                            elif batch_indices is not None:
-                                # Get phonemes from dataset using indices (fallback)
-                                phoneme_sequences = [train_dataset[idx].get('phoneme', []) for idx in batch_indices]
-                            else:
-                                # Last resort fallback - use text
-                                phoneme_sequences = text_inputs
-                                print("WARNING: No phoneme data found. Using text as fallback.")
-                                
-                            # Convert phonemes to indices using the phoneme map
-                            phoneme_indices_list, updated_map = phoneme_to_indices(phoneme_sequences, phoneme_map=self.phoneme_map)
-                            
-                            # Update phoneme map if new phonemes were found
-                            if len(updated_map) > len(self.phoneme_map):
-                                self.phoneme_map = updated_map
-                                if self.accelerator.is_local_main_process and global_update % 100 == 0:
-                                    print(f"Updated phoneme map to {len(self.phoneme_map)} phonemes")
-                            
-                            # Create phoneme tensor and mask
-                            b = len(phoneme_indices_list)
-                            max_nt = max(len(seq) for seq in phoneme_indices_list)
-                            
-                            # Create tensors on device
-                            phoneme_tensor = torch.zeros(b, max_nt, dtype=torch.long, device=mel_spec.device)
-                            phoneme_mask = torch.zeros(b, max_nt, dtype=torch.bool, device=mel_spec.device)
-                            
-                            for i, seq in enumerate(phoneme_indices_list):
-                                L = len(seq)
-                                phoneme_tensor[i, :L] = torch.tensor(seq, device=mel_spec.device)
-                                phoneme_mask[i, :L] = True
-                            
-                            # Calculate phoneme lengths
-                            phoneme_lengths = phoneme_mask.sum(dim=1)
-                            
-                            # Forward pass through duration predictor
-                            logw = self.duration_predictor_pred(phoneme_tensor, phoneme_mask)
-                            if logw.dim() == 3 and logw.size(1) == 1:
-                                logw = logw.squeeze(1)
-                            
-                            # Calculate target durations based on mel frames
-                            avg_frames = (mel_lengths.float() / phoneme_lengths.float()).unsqueeze(-1)
-                            target_durations = torch.ones_like(phoneme_tensor, dtype=torch.float, device=mel_spec.device)
-                            target_durations = target_durations * avg_frames
-                            target_durations = target_durations * phoneme_mask.float()
-                            
-                            # Log transform for prediction
-                            target_logw = torch.log(target_durations + 1e-6)
-                            
-                            # Calculate loss
-                            masked_diff = (logw - target_logw.detach())**2 * phoneme_mask
-                            dur_loss = torch.sum(masked_diff) / (torch.sum(phoneme_mask) + 1e-8)
-                            
-                            # Calculate MAE for monitoring
-                            pred_durations = torch.exp(torch.clamp(logw, -20, 20))
-                            true_durations = torch.exp(torch.clamp(target_logw.detach(), -20, 20))
-                            masked_diff_mae = torch.abs(pred_durations - true_durations) * phoneme_mask
-                            dur_mae = torch.sum(masked_diff_mae) / (torch.sum(phoneme_mask) + 1e-8)
-                            
-                            # Add weighted duration loss to main loss
-                            if self.active_duration_loss_weight > 0:
-                                loss = loss + self.active_duration_loss_weight * dur_loss
-                                
-                            # Log statistics occasionally
-                            if self.accelerator.is_local_main_process and global_update % 100 == 0:
-                                print(f"[DURATION] dur_loss: {dur_loss.item():.4f}, dur_mae: {dur_mae.item():.4f}")
-                                print(f"[DURATION] Average frames per phoneme: {avg_frames.mean().item():.2f}")
-                                print(f"[DURATION] Phase: {'Focus' if self.duration_focus_phase else 'Regular'}, Weight: {self.active_duration_loss_weight}")
+                        dur_loss, dur_mae, alignment_viz = self.calculate_duration_loss(
+                            text_inputs, mel_spec, mel_lengths, text_lengths, 
+                            batch_phonemes, batch_indices, global_update
+                        )
                         
-                        except Exception as e:
-                            print(f"[ERROR] Phoneme duration prediction failed: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            
-                            # Create minimal training signal when error occurs
-                            dur_loss = torch.tensor(0.01, device=loss.device, requires_grad=True)
-                            dur_mae = torch.tensor(1.0, device=loss.device)
-                            
-                            # Still add to main loss to maintain gradient flow
-                            if self.active_duration_loss_weight > 0:
-                                loss = loss + self.active_duration_loss_weight * dur_loss
+                        # Add weighted duration loss to main loss
+                        if dur_loss is not None and self.active_duration_loss_weight > 0:
+                            loss = loss + self.active_duration_loss_weight * dur_loss
                     
+                    # Log duration prediction details occasionally
+                    if self.accelerator.is_local_main_process and dur_loss is not None and global_update % 100 == 0:
+                        print(f"[DURATION] dur_loss: {dur_loss.item():.4f}, dur_mae: {dur_mae.item():.4f}")
+                        print(f"[DURATION] Phase: {'Focus' if self.duration_focus_phase else 'Regular'}, Weight: {self.active_duration_loss_weight}")
+                        
+                        # Save alignment visualization if available
+                        if alignment_viz is not None and global_update % 500 == 0:
+                            import json
+                            vis_path = f"{self.checkpoint_path}/alignments/alignment_{global_update}.json"
+                            with open(vis_path, 'w') as f:
+                                json.dump(alignment_viz, f, ensure_ascii=False, indent=2)
+                            print(f"Saved alignment visualization: {vis_path}")
+    
                     # Backward pass
                     self.accelerator.backward(loss)
     

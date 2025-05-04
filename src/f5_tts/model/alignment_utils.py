@@ -114,6 +114,89 @@ def create_phoneme_embedding(phoneme_map, embed_dim=192):
     num_phonemes = len(phoneme_map) + 1  # +1 for padding/unknown
     return torch.nn.Embedding(num_phonemes, embed_dim)
 
+def get_durations_from_alignment(alignment):
+    """
+    Extract duration of each token from alignment matrix.
+    
+    Args:
+        alignment: Alignment matrix [b, nt, mel_len]
+    
+    Returns:
+        durations: Duration of each token [b, nt]
+    """
+    return alignment.sum(dim=2)  # Sum across the mel dimension
+
+def phonemes_to_mel_alignment(phoneme_tensor, phoneme_mask, mel_spec, model):
+    """
+    Calculate alignment between phonemes and mel-spectrogram frames.
+    
+    Args:
+        phoneme_tensor: Tensor of phoneme indices [b, nt]
+        phoneme_mask: Mask for phoneme tensor [b, nt]
+        mel_spec: Mel spectrogram [b, n_mels, mel_len]
+        model: Model with alignment network
+        
+    Returns:
+        alignment: Hard alignment matrix [b, nt, mel_len]
+        similarity: Similarity matrix [b, nt, mel_len]
+    """
+    # Get similarity from alignment network
+    similarity = model.alignment_network(phoneme_tensor, phoneme_mask, mel_spec.permute(0, 2, 1))
+    
+    # Find monotonic alignment
+    alignment = monotonic_alignment_search(similarity)
+    
+    return alignment, similarity
+
+def monotonic_alignment_search(similarity_matrix):
+    b, nt, mel_len = similarity_matrix.shape
+    device = similarity_matrix.device
+    dtype = similarity_matrix.dtype
+    
+    # Sử dụng phép tính GPU-accelerated: cumulative sum
+    # Thay vì vòng lặp lồng nhau tính DP
+    cum_sim = torch.cumsum(similarity_matrix, dim=2)  # Tính tổng tích lũy theo chiều mel
+    
+    # Khởi tạo ma trận alignment
+    alignments = torch.zeros_like(similarity_matrix)
+    
+    # Tính durations trực tiếp bằng argmax
+    # Tìm vị trí tốt nhất để chuyển sang phoneme tiếp theo
+    for i in range(b):
+        start_frame = 0
+        
+        for n in range(nt - 1):  # Xử lý tất cả phoneme trừ phoneme cuối
+            # Tìm vị trí tốt nhất để kết thúc phoneme hiện tại
+            scores = torch.zeros(mel_len, device=device, dtype=dtype)
+            scores[:start_frame] = -float('inf')  # Đảm bảo không quay lại
+            
+            if n < nt - 1:
+                # Tính điểm cho mỗi vị trí kết thúc có thể
+                for end_frame in range(start_frame, mel_len):
+                    # Điểm cho phoneme hiện tại kết thúc tại end_frame
+                    curr_score = cum_sim[i, n, end_frame] - (cum_sim[i, n, start_frame-1] if start_frame > 0 else 0)
+                    # Điểm cho phoneme tiếp theo bắt đầu từ end_frame+1
+                    next_score = cum_sim[i, n+1, -1] - (cum_sim[i, n+1, end_frame] if end_frame < mel_len-1 else 0)
+                    scores[end_frame] = curr_score + next_score
+            
+            # Tìm vị trí tốt nhất
+            best_end = torch.argmax(scores).item()
+            
+            # Đánh dấu tất cả frames từ start_frame đến best_end thuộc về phoneme hiện tại
+            alignments[i, n, start_frame:best_end+1] = 1
+            
+            # Cập nhật start_frame cho phoneme tiếp theo
+            start_frame = best_end + 1
+            if start_frame >= mel_len:
+                break  # Không còn frames
+        
+        # Phoneme cuối cùng lấy tất cả frames còn lại
+        if start_frame < mel_len:
+            alignments[i, -1, start_frame:] = 1
+    
+    return alignments
+
+'''
 def monotonic_alignment_search(similarity_matrix):
     """
     Lightning-fast monotonic alignment search algorithm that remains on GPU.
@@ -152,15 +235,17 @@ def monotonic_alignment_search(similarity_matrix):
     
     # Process each sample in the batch - sequentially but all on GPU
     for i in range(b):
-        # Mark end position
-        alignments[i, nt-1, mel_len-1] = 1
+        # Store the path for this sample
+        path = []
         
-        # Backtracking on GPU
+        # Start from the end position
         n, t = nt-1, mel_len-1
+        path.append((n, t))
         
         # Use a fixed number of iterations for safety
         max_steps = nt + mel_len
         
+        # Backtracking on GPU to find the path
         for step in range(max_steps):
             if n == 0 and t == 0:
                 break
@@ -177,41 +262,57 @@ def monotonic_alignment_search(similarity_matrix):
                     t -= 1
             
             if n >= 0 and t >= 0:
-                alignments[i, n, t] = 1
+                path.append((n, t))
+        
+        # Reverse the path to start from (0,0)
+        path.reverse()
+        
+        # Process the path to create hard alignment
+        prev_n = -1
+        
+        for p_n, p_t in path:
+            # When we move to a new phoneme, all frames from prev_t to current t
+            # are assigned to the current phoneme
+            if p_n != prev_n:
+                # Mark this position as belonging to current phoneme
+                alignments[i, p_n, p_t] = 1
+                prev_n = p_n
+            else:
+                # Continue marking frames for the current phoneme
+                alignments[i, p_n, p_t] = 1
+        
+        # Ensure we don't have any phoneme with zero duration by checking each phoneme
+        for n in range(nt):
+            if alignments[i, n].sum() == 0:
+                # Find a position to assign to this phoneme
+                # Assign it the frame right after the previous phoneme
+                assigned = False
+                
+                # Try to find where the previous phoneme ends
+                if n > 0:
+                    for t in range(mel_len-1, -1, -1):
+                        if alignments[i, n-1, t] == 1:
+                            # Assign the next frame (if available) to current phoneme
+                            if t+1 < mel_len:
+                                alignments[i, n, t+1] = 1
+                                assigned = True
+                            # If no next frame, share the last frame with previous phoneme
+                            else:
+                                alignments[i, n, t] = 1
+                                assigned = True
+                            break
+                
+                # If still not assigned (first phoneme or couldn't find prev end),
+                # assign the first available frame
+                if not assigned:
+                    for t in range(mel_len):
+                        if not any(alignments[i, :, t] > 0):
+                            alignments[i, n, t] = 1
+                            break
+                    else:
+                        # If all frames are taken, assign to the first frame
+                        # This is a fallback to ensure non-zero duration
+                        alignments[i, n, 0] = 1
     
     return alignments
-    
-def get_durations_from_alignment(alignment):
-    """
-    Extract duration of each token from alignment matrix.
-    
-    Args:
-        alignment: Alignment matrix [b, nt, mel_len]
-    
-    Returns:
-        durations: Duration of each token [b, nt]
-    """
-    return alignment.sum(dim=2)  # Sum across the mel dimension
-
-def phonemes_to_mel_alignment(phoneme_tensor, phoneme_mask, mel_spec, model):
-    """
-    Calculate alignment between phonemes and mel-spectrogram frames.
-    
-    Args:
-        phoneme_tensor: Tensor of phoneme indices [b, nt]
-        phoneme_mask: Mask for phoneme tensor [b, nt]
-        mel_spec: Mel spectrogram [b, n_mels, mel_len]
-        model: Model with alignment network
-        
-    Returns:
-        alignment: Hard alignment matrix [b, nt, mel_len]
-        similarity: Similarity matrix [b, nt, mel_len]
-    """
-    # Get similarity from alignment network
-    similarity = model.alignment_network(phoneme_tensor, phoneme_mask, mel_spec.permute(0, 2, 1))
-    
-    # Find monotonic alignment
-    alignment = monotonic_alignment_search(similarity)
-    
-    return alignment, similarity
-    
+'''

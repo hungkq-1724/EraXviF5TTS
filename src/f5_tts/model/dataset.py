@@ -131,36 +131,38 @@ class CustomDataset(Dataset):
             audio_path = row["audio_path"]
             text = row["text"]
             duration = row["duration"]
-
+            # Lấy trường phoneme từ dữ liệu, nếu không có thì trả về list rỗng
+            phoneme = row.get("phoneme", [])
+    
             # filter by given length
             if 0.3 <= duration <= 30:
                 break  # valid
-
+    
             index = (index + 1) % len(self.data)
-
+    
         if self.preprocessed_mel:
             mel_spec = torch.tensor(row["mel_spec"])
         else:
             audio, source_sample_rate = torchaudio.load(audio_path)
-
+    
             # make sure mono input
             if audio.shape[0] > 1:
                 audio = torch.mean(audio, dim=0, keepdim=True)
-
+    
             # resample if necessary
             if source_sample_rate != self.target_sample_rate:
                 resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
                 audio = resampler(audio)
-
+    
             # to mel spectrogram
             mel_spec = self.mel_spectrogram(audio)
             mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
-
+    
         return {
             "mel_spec": mel_spec,
             "text": text,
+            "phoneme": phoneme,  # Thêm phoneme vào kết quả trả về
         }
-
 
 # Dynamic Batch Sampler
 class DynamicBatchSampler(Sampler[list[int]]):
@@ -303,16 +305,13 @@ def load_dataset(
     return train_dataset
 
 
-# collation
-
-
 def collate_fn(batch):
     mel_specs = [item["mel_spec"].squeeze(0) for item in batch]
     mel_lengths = torch.LongTensor([spec.shape[-1] for spec in mel_specs])
     max_mel_length = mel_lengths.amax()
 
     padded_mel_specs = []
-    for spec in mel_specs:  # TODO. maybe records mask for attention here
+    for spec in mel_specs:
         padding = (0, max_mel_length - spec.size(-1))
         padded_spec = F.pad(spec, padding, value=0)
         padded_mel_specs.append(padded_spec)
@@ -321,10 +320,14 @@ def collate_fn(batch):
 
     text = [item["text"] for item in batch]
     text_lengths = torch.LongTensor([len(item) for item in text])
+    
+    # Thu thập thông tin phoneme từ mỗi item trong batch
+    phoneme = [item.get("phoneme", []) for item in batch]
 
     return dict(
         mel=mel_specs,
         mel_lengths=mel_lengths,
         text=text,
         text_lengths=text_lengths,
+        phoneme=phoneme,  # Thêm phoneme vào kết quả trả về của collate_fn
     )
