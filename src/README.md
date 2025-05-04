@@ -37,6 +37,7 @@ Our implementation fundamentally improves upon the original F5-TTS architecture 
 
 3. **Generating Phoneme Data**:
    ```bash
+   # Change path to your metadata.csv and path to output phonemes_metadata.jsonl
    # Execute preprocessing script
    python /path/to/f5_tts/model/preprocess_phoneme.py
    ```
