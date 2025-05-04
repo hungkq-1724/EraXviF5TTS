@@ -148,171 +148,392 @@ def phonemes_to_mel_alignment(phoneme_tensor, phoneme_mask, mel_spec, model):
     
     return alignment, similarity
 
-def monotonic_alignment_search(similarity_matrix):
+def viterbi_monotonic_alignment_search(similarity_matrix):
     b, nt, mel_len = similarity_matrix.shape
     device = similarity_matrix.device
-    dtype = similarity_matrix.dtype
     
-    # Sử dụng phép tính GPU-accelerated: cumulative sum
-    # Thay vì vòng lặp lồng nhau tính DP
-    cum_sim = torch.cumsum(similarity_matrix, dim=2)  # Tính tổng tích lũy theo chiều mel
+    # Vectorized Viterbi forward pass
+    path_prob = torch.zeros((b, nt, mel_len), device=device)
+    path_prob[:, 0, 0] = similarity_matrix[:, 0, 0]
     
-    # Khởi tạo ma trận alignment
+    # Tính toán ma trận path cộng dồn hoàn toàn vector hóa
+    for n in range(nt):
+        if n > 0:
+            # Lan truyền theo chiều dọc
+            path_prob[:, n, 0] = path_prob[:, n-1, 0] + similarity_matrix[:, n, 0]
+        
+        # Lan truyền theo chiều ngang (vectorized cho tất cả batch)
+        for t in range(1, mel_len):
+            if n == 0:
+                path_prob[:, 0, t] = path_prob[:, 0, t-1] + similarity_matrix[:, 0, t]
+            else:
+                path_prob[:, n, t] = similarity_matrix[:, n, t] + torch.maximum(
+                    path_prob[:, n-1, t], path_prob[:, n, t-1]
+                )
+    
+    # Tạo alignments nhanh với hàm chunk
     alignments = torch.zeros_like(similarity_matrix)
     
-    # Tính durations trực tiếp bằng argmax
-    # Tìm vị trí tốt nhất để chuyển sang phoneme tiếp theo
+    # Backtracking với đoạn văn bản cho mỗi batch
+    boundaries = torch.zeros((b, nt), dtype=torch.long, device=device)
+    
+    # Vector hóa tìm điểm tốt nhất cho phân đoạn
     for i in range(b):
-        start_frame = 0
+        curr_mel_idx = mel_len - 1
         
-        for n in range(nt - 1):  # Xử lý tất cả phoneme trừ phoneme cuối
-            # Tìm vị trí tốt nhất để kết thúc phoneme hiện tại
-            scores = torch.zeros(mel_len, device=device, dtype=dtype)
-            scores[:start_frame] = -float('inf')  # Đảm bảo không quay lại
+        # Đi từ cuối lên, tìm boundary tối ưu
+        for n in range(nt-1, -1, -1):
+            cost_right = path_prob[i, n, curr_mel_idx]
             
-            if n < nt - 1:
-                # Tính điểm cho mỗi vị trí kết thúc có thể
-                for end_frame in range(start_frame, mel_len):
-                    # Điểm cho phoneme hiện tại kết thúc tại end_frame
-                    curr_score = cum_sim[i, n, end_frame] - (cum_sim[i, n, start_frame-1] if start_frame > 0 else 0)
-                    # Điểm cho phoneme tiếp theo bắt đầu từ end_frame+1
-                    next_score = cum_sim[i, n+1, -1] - (cum_sim[i, n+1, end_frame] if end_frame < mel_len-1 else 0)
-                    scores[end_frame] = curr_score + next_score
+            if n == 0:
+                boundary_idx = 0
+            else:
+                # Tìm vị trí tốt nhất dựa trên gradient của path probability
+                costs = path_prob[i, n, :curr_mel_idx+1]
+                gradient = costs[1:] - costs[:-1]
+                boundary_candidates = torch.where(gradient > 0)[0]
+                
+                if len(boundary_candidates) > 0:
+                    boundary_idx = boundary_candidates[-1].item()
+                else:
+                    boundary_idx = 0
             
-            # Tìm vị trí tốt nhất
-            best_end = torch.argmax(scores).item()
+            # Đánh dấu từ boundary tới curr_mel_idx
+            alignments[i, n, boundary_idx:curr_mel_idx+1] = 1
+            boundaries[i, n] = boundary_idx
+            curr_mel_idx = boundary_idx - 1
             
-            # Đánh dấu tất cả frames từ start_frame đến best_end thuộc về phoneme hiện tại
-            alignments[i, n, start_frame:best_end+1] = 1
-            
-            # Cập nhật start_frame cho phoneme tiếp theo
-            start_frame = best_end + 1
-            if start_frame >= mel_len:
-                break  # Không còn frames
-        
-        # Phoneme cuối cùng lấy tất cả frames còn lại
-        if start_frame < mel_len:
-            alignments[i, -1, start_frame:] = 1
+            if curr_mel_idx < 0:
+                break
     
     return alignments
 
-'''
-def monotonic_alignment_search(similarity_matrix):
-    """
-    Lightning-fast monotonic alignment search algorithm that remains on GPU.
-    
-    Args:
-        similarity_matrix: Similarity matrix [b, nt, mel_len]
-    
-    Returns:
-        hard_alignment: Alignments [b, nt, mel_len]
-    """
+def windowed_monotonic_alignment(similarity_matrix, window_size=0.2):
     b, nt, mel_len = similarity_matrix.shape
     device = similarity_matrix.device
-    dtype = similarity_matrix.dtype
     
-    # Initialize forward pass
-    forward = torch.full((b, nt, mel_len), float('-inf'), device=device, dtype=dtype)
-    forward[:, 0, 0] = similarity_matrix[:, 0, 0]
-    
-    # Fill first row and column - vectorized across batch dimension
-    for t in range(1, mel_len):
-        forward[:, 0, t] = forward[:, 0, t-1] + similarity_matrix[:, 0, t]
-    
-    for n in range(1, nt):
-        forward[:, n, 0] = forward[:, n-1, 0] + similarity_matrix[:, n, 0]
-    
-    # Fill the rest of the DP table - vectorized across batch
-    for n in range(1, nt):
-        for t in range(1, mel_len):
-            forward[:, n, t] = similarity_matrix[:, n, t] + torch.maximum(
-                forward[:, n-1, t],  # from above
-                forward[:, n, t-1]   # from left
-            )
-    
-    # Create output - directly on GPU
+    # Khởi tạo alignment
     alignments = torch.zeros_like(similarity_matrix)
     
-    # Process each sample in the batch - sequentially but all on GPU
+    # Tính toán với cửa sổ tối ưu
+    actual_window = max(2, int(mel_len * window_size))
+    
     for i in range(b):
-        # Store the path for this sample
-        path = []
+        # Tính tỷ lệ trung bình
+        frames_per_phone = mel_len / nt
         
-        # Start from the end position
-        n, t = nt-1, mel_len-1
-        path.append((n, t))
+        # Bắt đầu từ 0
+        start_idx = 0
         
-        # Use a fixed number of iterations for safety
-        max_steps = nt + mel_len
-        
-        # Backtracking on GPU to find the path
-        for step in range(max_steps):
-            if n == 0 and t == 0:
-                break
-                
-            if n == 0:
-                t -= 1
-            elif t == 0:
-                n -= 1
-            else:
-                # Compare values and move accordingly
-                if forward[i, n-1, t] > forward[i, n, t-1]:
-                    n -= 1
-                else:
-                    t -= 1
+        # Xử lý tất cả phoneme trừ cái cuối
+        for n in range(nt - 1):
+            # Tính vị trí dự kiến
+            expected_end = int((n + 1) * frames_per_phone)
             
-            if n >= 0 and t >= 0:
-                path.append((n, t))
+            # Xác định cửa sổ tìm kiếm quanh vị trí dự kiến
+            window_start = max(start_idx, expected_end - actual_window)
+            window_end = min(mel_len - 1, expected_end + actual_window)
+            
+            # Tính score chỉ trong cửa sổ, giúp tăng tốc đáng kể
+            sub_scores = similarity_matrix[i, n, window_start:window_end+1]
+            best_offset = torch.argmax(sub_scores).item()
+            best_end = window_start + best_offset
+            
+            # Đánh dấu alignment
+            alignments[i, n, start_idx:best_end+1] = 1
+            
+            # Cập nhật vị trí bắt đầu cho phoneme tiếp theo
+            start_idx = best_end + 1
+            
+            if start_idx >= mel_len:
+                break
         
-        # Reverse the path to start from (0,0)
-        path.reverse()
-        
-        # Process the path to create hard alignment
-        prev_n = -1
-        
-        for p_n, p_t in path:
-            # When we move to a new phoneme, all frames from prev_t to current t
-            # are assigned to the current phoneme
-            if p_n != prev_n:
-                # Mark this position as belonging to current phoneme
-                alignments[i, p_n, p_t] = 1
-                prev_n = p_n
-            else:
-                # Continue marking frames for the current phoneme
-                alignments[i, p_n, p_t] = 1
-        
-        # Ensure we don't have any phoneme with zero duration by checking each phoneme
-        for n in range(nt):
-            if alignments[i, n].sum() == 0:
-                # Find a position to assign to this phoneme
-                # Assign it the frame right after the previous phoneme
-                assigned = False
-                
-                # Try to find where the previous phoneme ends
-                if n > 0:
-                    for t in range(mel_len-1, -1, -1):
-                        if alignments[i, n-1, t] == 1:
-                            # Assign the next frame (if available) to current phoneme
-                            if t+1 < mel_len:
-                                alignments[i, n, t+1] = 1
-                                assigned = True
-                            # If no next frame, share the last frame with previous phoneme
-                            else:
-                                alignments[i, n, t] = 1
-                                assigned = True
-                            break
-                
-                # If still not assigned (first phoneme or couldn't find prev end),
-                # assign the first available frame
-                if not assigned:
-                    for t in range(mel_len):
-                        if not any(alignments[i, :, t] > 0):
-                            alignments[i, n, t] = 1
-                            break
-                    else:
-                        # If all frames are taken, assign to the first frame
-                        # This is a fallback to ensure non-zero duration
-                        alignments[i, n, 0] = 1
+        # Xử lý phoneme cuối cùng
+        if start_idx < mel_len:
+            alignments[i, -1, start_idx:] = 1
     
     return alignments
-'''
+
+def progressive_monotonic_alignment(similarity_matrix):
+    b, nt, mel_len = similarity_matrix.shape
+    device = similarity_matrix.device
+    
+    # Bước 1: Tạo alignment thô dựa trên tỷ lệ đều
+    alignments = torch.zeros_like(similarity_matrix)
+    
+    for i in range(b):
+        # Chia đều frames
+        boundaries = torch.linspace(0, mel_len, nt+1).long()
+        
+        # Gán segment theo phoneme
+        for n in range(nt):
+            start = boundaries[n]
+            end = boundaries[n+1]
+            if start < end:  # Đảm bảo không có segment rỗng
+                alignments[i, n, start:end] = 1
+    
+    # Bước 2: Tinh chỉnh alignment với vài vòng tối ưu
+    refinement_steps = 2  # Số bước tinh chỉnh (thấp = nhanh)
+    
+    # Lưu trữ entropy ban đầu
+    total_score = torch.sum(similarity_matrix * alignments)
+    
+    for _ in range(refinement_steps):
+        for i in range(b):
+            for n in range(nt-1):
+                # Tìm boundary giữa phoneme n và n+1
+                boundary = None
+                for t in range(mel_len):
+                    if t < mel_len-1 and alignments[i, n, t] == 1 and alignments[i, n, t+1] == 0:
+                        boundary = t
+                        break
+                
+                if boundary is not None:
+                    # Thử dịch boundary sang trái/phải và chọn cấu hình tốt nhất
+                    shift_range = min(5, mel_len // 20)  # Giới hạn phạm vi dịch chuyển
+                    best_score = total_score
+                    best_shift = 0
+                    
+                    for shift in range(-shift_range, shift_range + 1):
+                        new_boundary = boundary + shift
+                        if 0 <= new_boundary < mel_len-1:
+                            # Tạo alignment thử
+                            test_alignment = alignments[i].clone()
+                            
+                            # Thay đổi boundary
+                            if shift < 0:  # Dịch sang trái: gán thêm frames cho phoneme n+1
+                                test_alignment[n, new_boundary+1:boundary+1] = 0
+                                test_alignment[n+1, new_boundary+1:boundary+1] = 1
+                            elif shift > 0:  # Dịch sang phải: gán thêm frames cho phoneme n
+                                test_alignment[n, boundary+1:new_boundary+1] = 1
+                                test_alignment[n+1, boundary+1:new_boundary+1] = 0
+                            
+                            # Tính score mới
+                            new_score = torch.sum(similarity_matrix[i] * test_alignment)
+                            
+                            if new_score > best_score:
+                                best_score = new_score
+                                best_shift = shift
+                    
+                    # Áp dụng shift tốt nhất
+                    if best_shift != 0:
+                        new_boundary = boundary + best_shift
+                        if best_shift < 0:  # Dịch sang trái
+                            alignments[i, n, new_boundary+1:boundary+1] = 0
+                            alignments[i, n+1, new_boundary+1:boundary+1] = 1
+                        else:  # Dịch sang phải
+                            alignments[i, n, boundary+1:new_boundary+1] = 1
+                            alignments[i, n+1, boundary+1:new_boundary+1] = 0
+                        
+                        # Cập nhật tổng score
+                        total_score = best_score
+    
+    return alignments
+
+# Tạo file riêng cho các giải thuật alignment
+# File: alignment_algorithms.py
+
+import torch
+
+def viterbi_monotonic_alignment_search(similarity_matrix):
+    b, nt, mel_len = similarity_matrix.shape
+    device = similarity_matrix.device
+    
+    # Vectorized Viterbi forward pass
+    path_prob = torch.zeros((b, nt, mel_len), device=device)
+    path_prob[:, 0, 0] = similarity_matrix[:, 0, 0]
+    
+    # Tính toán ma trận path cộng dồn hoàn toàn vector hóa
+    for n in range(nt):
+        if n > 0:
+            # Lan truyền theo chiều dọc
+            path_prob[:, n, 0] = path_prob[:, n-1, 0] + similarity_matrix[:, n, 0]
+        
+        # Lan truyền theo chiều ngang (vectorized cho tất cả batch)
+        for t in range(1, mel_len):
+            if n == 0:
+                path_prob[:, 0, t] = path_prob[:, 0, t-1] + similarity_matrix[:, 0, t]
+            else:
+                path_prob[:, n, t] = similarity_matrix[:, n, t] + torch.maximum(
+                    path_prob[:, n-1, t], path_prob[:, n, t-1]
+                )
+    
+    # Tạo alignments nhanh với hàm chunk
+    alignments = torch.zeros_like(similarity_matrix)
+    
+    # Backtracking với đoạn văn bản cho mỗi batch
+    boundaries = torch.zeros((b, nt), dtype=torch.long, device=device)
+    
+    # Vector hóa tìm điểm tốt nhất cho phân đoạn
+    for i in range(b):
+        curr_mel_idx = mel_len - 1
+        
+        # Đi từ cuối lên, tìm boundary tối ưu
+        for n in range(nt-1, -1, -1):
+            cost_right = path_prob[i, n, curr_mel_idx]
+            
+            if n == 0:
+                boundary_idx = 0
+            else:
+                # Tìm vị trí tốt nhất dựa trên gradient của path probability
+                costs = path_prob[i, n, :curr_mel_idx+1]
+                gradient = costs[1:] - costs[:-1]
+                boundary_candidates = torch.where(gradient > 0)[0]
+                
+                if len(boundary_candidates) > 0:
+                    boundary_idx = boundary_candidates[-1].item()
+                else:
+                    boundary_idx = 0
+            
+            # Đánh dấu từ boundary tới curr_mel_idx
+            alignments[i, n, boundary_idx:curr_mel_idx+1] = 1
+            boundaries[i, n] = boundary_idx
+            curr_mel_idx = boundary_idx - 1
+            
+            if curr_mel_idx < 0:
+                break
+    
+    return alignments
+
+def windowed_monotonic_alignment(similarity_matrix, window_size=0.2):
+    b, nt, mel_len = similarity_matrix.shape
+    device = similarity_matrix.device
+    
+    # Khởi tạo alignment - THIẾU DÒNG NÀY TRONG BẢN BAN ĐẦU
+    alignments = torch.zeros_like(similarity_matrix)
+    
+    # Tính toán với cửa sổ tối ưu
+    actual_window = max(2, int(mel_len * window_size))
+    
+    for i in range(b):
+        # Tính tỷ lệ trung bình
+        frames_per_phone = mel_len / nt
+        
+        # Bắt đầu từ 0
+        start_idx = 0
+        
+        # Xử lý tất cả phoneme trừ cái cuối
+        for n in range(nt - 1):
+            # Tính vị trí dự kiến
+            expected_end = int((n + 1) * frames_per_phone)
+            
+            # Xác định cửa sổ tìm kiếm quanh vị trí dự kiến
+            window_start = max(start_idx, expected_end - actual_window)
+            window_end = min(mel_len - 1, expected_end + actual_window)
+            
+            # Tính score chỉ trong cửa sổ, giúp tăng tốc đáng kể
+            sub_scores = similarity_matrix[i, n, window_start:window_end+1]
+            best_offset = torch.argmax(sub_scores).item()
+            best_end = window_start + best_offset
+            
+            # Đánh dấu alignment
+            alignments[i, n, start_idx:best_end+1] = 1
+            
+            # Cập nhật vị trí bắt đầu cho phoneme tiếp theo
+            start_idx = best_end + 1
+            
+            if start_idx >= mel_len:
+                break
+        
+        # Xử lý phoneme cuối cùng
+        if start_idx < mel_len:
+            alignments[i, -1, start_idx:] = 1
+    
+    return alignments
+
+def progressive_monotonic_alignment(similarity_matrix):
+    b, nt, mel_len = similarity_matrix.shape
+    device = similarity_matrix.device
+    
+    # Bước 1: Tạo alignment thô dựa trên tỷ lệ đều
+    alignments = torch.zeros_like(similarity_matrix)
+    
+    for i in range(b):
+        # Chia đều frames
+        boundaries = torch.linspace(0, mel_len, nt+1).long()
+        
+        # Gán segment theo phoneme
+        for n in range(nt):
+            start = boundaries[n]
+            end = boundaries[n+1]
+            if start < end:  # Đảm bảo không có segment rỗng
+                alignments[i, n, start:end] = 1
+    
+    # Bước 2: Tinh chỉnh alignment với vài vòng tối ưu
+    refinement_steps = 2  # Số bước tinh chỉnh (thấp = nhanh)
+    
+    # Lưu trữ entropy ban đầu
+    total_score = torch.sum(similarity_matrix * alignments)
+    
+    for _ in range(refinement_steps):
+        for i in range(b):
+            for n in range(nt-1):
+                # Tìm boundary giữa phoneme n và n+1
+                boundary = None
+                for t in range(mel_len):
+                    if t < mel_len-1 and alignments[i, n, t] == 1 and alignments[i, n, t+1] == 0:
+                        boundary = t
+                        break
+                
+                if boundary is not None:
+                    # Thử dịch boundary sang trái/phải và chọn cấu hình tốt nhất
+                    shift_range = min(5, mel_len // 20)  # Giới hạn phạm vi dịch chuyển
+                    best_score = total_score
+                    best_shift = 0
+                    
+                    for shift in range(-shift_range, shift_range + 1):
+                        new_boundary = boundary + shift
+                        if 0 <= new_boundary < mel_len-1:
+                            # Tạo alignment thử
+                            test_alignment = alignments[i].clone()
+                            
+                            # Thay đổi boundary
+                            if shift < 0:  # Dịch sang trái: gán thêm frames cho phoneme n+1
+                                test_alignment[n, new_boundary+1:boundary+1] = 0
+                                test_alignment[n+1, new_boundary+1:boundary+1] = 1
+                            elif shift > 0:  # Dịch sang phải: gán thêm frames cho phoneme n
+                                test_alignment[n, boundary+1:new_boundary+1] = 1
+                                test_alignment[n+1, boundary+1:new_boundary+1] = 0
+                            
+                            # Tính score mới
+                            new_score = torch.sum(similarity_matrix[i] * test_alignment)
+                            
+                            if new_score > best_score:
+                                best_score = new_score
+                                best_shift = shift
+                    
+                    # Áp dụng shift tốt nhất
+                    if best_shift != 0:
+                        new_boundary = boundary + best_shift
+                        if best_shift < 0:  # Dịch sang trái
+                            alignments[i, n, new_boundary+1:boundary+1] = 0
+                            alignments[i, n+1, new_boundary+1:boundary+1] = 1
+                        else:  # Dịch sang phải
+                            alignments[i, n, boundary+1:new_boundary+1] = 1
+                            alignments[i, n+1, boundary+1:new_boundary+1] = 0
+                        
+                        # Cập nhật tổng score
+                        total_score = best_score
+    
+    return alignments
+    
+# Hàm lựa chọn giải thuật dựa trên tham số
+def monotonic_alignment_search(similarity_matrix, algorithm="window"):
+    """
+    Hàm gọi một trong các giải thuật căn chỉnh monotonic dựa trên tham số.
+    
+    Args:
+        similarity_matrix: Ma trận tương đồng [b, nt, mel_len]
+        algorithm: Tên giải thuật ('viterbi', 'window', hoặc 'progressive')
+        
+    Returns:
+        alignment: Ma trận căn chỉnh [b, nt, mel_len]
+    """
+    if algorithm == "viterbi":
+        return viterbi_vectorized_alignment(similarity_matrix)
+    elif algorithm == "window":
+        return windowed_monotonic_alignment(similarity_matrix)
+    elif algorithm == "progressive":
+        return progressive_monotonic_alignment(similarity_matrix)
+    else:
+        raise ValueError(f"Không hỗ trợ giải thuật: {algorithm}. Chọn một trong các giải thuật: 'viterbi', 'window', 'progressive'")
