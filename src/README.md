@@ -40,7 +40,7 @@ Our implementation fundamentally improves upon the original F5-TTS architecture 
    # Execute preprocessing script
    python /path/to/f5_tts/model/preprocess_phoneme.py
    ```
-   This process creates a comprehensive `phonemes_metadata.jsonl` file in your designated data directory. Run F5-TTS Gradio to extend vocab/prepare data (duration.json & raw.arrow) normally, the new codes will leverage this `phonemes_metadata.jsonl` instead of origin `metadata.csv` file.
+   This process creates a comprehensive `phonemes_metadata.jsonl` file in your designated data directory. Run F5-TTS Gradio to extend vocab/prepare data (validate audio files and generate `duration.json` & `raw.arrow`) normally, the new codes will leverage this `phonemes_metadata.jsonl` instead of origin `metadata.csv` file.
 
 ### Optimized Training Approach
 
