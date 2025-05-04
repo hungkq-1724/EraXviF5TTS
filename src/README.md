@@ -48,7 +48,7 @@ Our implementation fundamentally improves upon the original F5-TTS architecture 
 Our training strategy implements a two-phase process:
 
 1. **Duration Predictor Warm-up Phase**: 
-   - Sử dụng Dynamic Windows Programming algo to calculate monotonic alignment cho tốc độ nhanh và chính xác.
+   - Sử dụng Dynamic Programming Window algo to calculate monotonic alignment to balance training speed & quality. You can also try Viterbi Vectorized (also fast but lower quality) or Progressive Refinement (a bit higher quality ut slower).  
    - Initial 3 epochs focus on training the duration predictor while freezing audio model parameters
    - This approach ensures stability and prevents initial training divergence
 
