@@ -30,6 +30,66 @@ from f5_tts.model.alignment_utils import (
 
 import re
 
+import math
+import logging
+
+class DurationWeightScheduler:
+    def __init__(self, total_epochs, initial_weight=1.5,
+                 min_weight=0.1, ema_alpha=0.05,
+                 slope=8.0, center=0.75, decay_rate=3.0,
+                 decay_start_frac=0.1, max_delta=0.01,
+                 logger=None):
+        self.total_epochs   = total_epochs
+        self.initial_weight = initial_weight
+        self.min_weight     = min_weight
+        self.ema_alpha      = ema_alpha
+        self.slope          = slope
+        self.center         = center
+        self.decay_rate     = decay_rate
+        self.decay_start_epoch = max(1, int(total_epochs * decay_start_frac))
+        self.max_delta      = max_delta
+        self.ema_cov        = 0.0
+        self.ema_diag       = 0.0
+        self.prev_weight    = initial_weight
+        self.logger         = logger or logging.getLogger(__name__)
+        self.phase = 1
+                
+    def step(self, update, coverage, diagonal, epoch, steps_per_epoch):
+        # 1. EMA smoothing
+        self.ema_cov  = self.ema_alpha*coverage  + (1-self.ema_alpha)*self.ema_cov
+        self.ema_diag = self.ema_alpha*diagonal + (1-self.ema_alpha)*self.ema_diag
+
+        # 2. Compute quality
+        quality = 0.4*self.ema_cov + 0.6*self.ema_diag
+        quality = max(0.0, min(1.0, quality))
+
+        # 3. Phase 1 fixed
+        if self.phase == 1:
+            return self.initial_weight
+
+        # 4. Sigmoid-based target
+        sig = 1.0/(1.0 + math.exp(-self.slope*(quality - self.center)))
+        target = self.min_weight + (1 - sig)*(self.initial_weight - self.min_weight)
+
+        # 5. Exponential epoch-based decay
+        if epoch > self.decay_start_epoch:
+            prog = (epoch - self.decay_start_epoch)/(self.total_epochs - self.decay_start_epoch)
+            decay = math.exp(-self.decay_rate * prog)
+            target = self.min_weight + (target - self.min_weight)*decay
+
+        # 6. Rate-limit delta
+        delta = target - self.prev_weight
+        delta = max(-self.max_delta, min(delta, self.max_delta))
+        weight = self.prev_weight + delta
+        self.prev_weight = weight
+
+        # 7. Log once per epoch
+        if update % steps_per_epoch < 1:
+            self.logger.info(f"[Epoch {epoch}] dur_weight={weight:.4f} "
+                             f"cov={self.ema_cov:.4f} diag={self.ema_diag:.4f}")
+
+        return weight
+
 class Trainer:
     def __init__(
         self,
@@ -146,19 +206,33 @@ class Trainer:
         self.local_vocoder_path = local_vocoder_path
     
         self.noise_scheduler = noise_scheduler
-    
-        # Set up the duration predictor and its parameters
+
+        # duration_predictor
         self.duration_predictor = duration_predictor
         self.base_duration_loss_weight = duration_loss_weight  # Store base weight
-
+        
         # Add duration focus parameters
         self.duration_focus_updates = duration_focus_updates
         self.duration_focus_weight = duration_focus_weight
         self.duration_focus_phase = self.duration_focus_updates > 0
-
+        
+        # Initialize alignment manager and duration weight scheduler
+        self.alignment_manager = alignment_utils.AlignmentMethodManager()
+        self.phase2_start_update = None
+        
+        # Initialize duration weight scheduler
+        self.dur_weight_scheduler = DurationWeightScheduler(
+            total_epochs=self.epochs,
+            initial_weight=self.duration_focus_weight,
+            min_weight=self.base_duration_loss_weight,
+            logger=logging.getLogger("durweight") if self.is_main else None
+        )
+        # Set initial phase
+        self.dur_weight_scheduler.phase = 1
+        
         # Set the actual weight used in training to focus weight during focus phase
         self.active_duration_loss_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
-
+        
         # If duration predictor is provided, attach it to the model AND create separate copies
         if self.duration_predictor is not None:
             # Attach main predictor to model
@@ -315,7 +389,7 @@ class Trainer:
                 print(f"Error loading reference audio files: {e}")
                 import traceback
                 traceback.print_exc()  # Print the full traceback for better debugging
-                
+
     def generate_reference_samples(self, global_update, vocoder, nfe_step, cfg_strength, sway_sampling_coef):
         """Generate samples based on reference audio but with new prompt text."""
         if not self.is_main or not self.log_samples or not self.ref_mels:
@@ -807,6 +881,45 @@ class Trainer:
                 phoneme_tensor[i, :L] = torch.tensor(seq, device=mel_spec.device)
                 phoneme_mask[i, :L] = True
             
+            # Calculate current alignment metrics if available from previous iteration
+            coverage = None
+            diagonal = None
+            if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
+                coverage = alignment_utils.calculate_coverage(self.previous_alignment)
+                diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
+            
+            # Get appropriate alignment method
+            alignment_method, logs = alignment_utils.get_alignment_method(
+                self.alignment_manager,
+                global_update,
+                duration_focus_updates=self.duration_focus_updates,
+                coverage=coverage,
+                diagonal=diagonal,
+                phase2_start_update=self.phase2_start_update
+            )
+            
+            # Check for phase transition
+            if 'phase_transition' in logs and logs['phase_transition']:
+                self.phase2_start_update = global_update
+                self.duration_focus_phase = False
+                
+                # Update duration weight
+                self.active_duration_loss_weight = logs['duration_weight']
+                
+                # Unfreeze model parameters
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                if self.duration_predictor is not None:
+                    duration_params = list(self.duration_predictor.parameters())
+                    for param in unwrapped_model.parameters():
+                        if not any(param is dp for dp in duration_params):
+                            param.requires_grad = True
+                
+                print(f"\n===== PHASE TRANSITION at update {global_update} =====")
+                print(f"Reason: {logs.get('transition_reason', 'Unknown')}")
+                print(f"Switching to Phase 2 - Full Model Training with Progressive Alignment")
+                print(f"Duration loss weight: {self.active_duration_loss_weight}")
+                print(f"====================================================\n")
+                
             # Get text embeddings for creating similarity matrix
             with torch.no_grad():
                 # Lấy embedding cho phoneme
@@ -855,8 +968,13 @@ class Trainer:
                     if mel_lengths[i] < mel_spec.shape[1]:
                         similarity[i, :, mel_lengths[i]:] = -float('inf')
                 
-                # Áp dụng monotonic alignment search
-                alignment = monotonic_alignment_search(similarity)
+                # Use selected alignment method
+                if global_update % 100 == 0:
+                    print(f"Using alignment method: {alignment_method}")
+                alignment = monotonic_alignment_search(similarity, algorithm=alignment_method)
+                
+                # Store for next iteration metrics calculation
+                self.previous_alignment = alignment
                 
                 # Trích xuất thời lượng của từng phoneme
                 phoneme_durations = get_durations_from_alignment(alignment)
@@ -959,23 +1077,6 @@ class Trainer:
             
             return dur_loss, dur_mae, None
         
-    def collate_with_indices(batch):
-        # Start with standard collation
-        result = collate_fn(batch)
-        
-        # Add indices for each item in the batch
-        result['index'] = list(range(len(batch)))
-        
-        # Preserve phoneme data if it exists
-        if all('phoneme' in item for item in batch):
-            # Lấy dữ liệu từ key 'phoneme' (số ít) và lưu vào key 'phonemes' (số nhiều) trong result
-            result['phonemes'] = [item['phoneme'] for item in batch]
-        elif 'phoneme' in result:
-            # Nếu collate_fn đã trả về phoneme, đảm bảo chúng tôi sử dụng tên key nhất quán
-            result['phonemes'] = result.pop('phoneme')
-        
-        return result
-    
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         """
         Train the model with phoneme-based duration prediction using monotonic alignment.
@@ -1211,13 +1312,19 @@ class Trainer:
                     log_dict = {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}
                     if dur_loss is not None:
                         log_dict["duration_loss"] = dur_loss.item()
+                        log_dict["duration_loss_weight"] = self.active_duration_loss_weight
                         
-                        # Use the correct weight for logging
-                        actual_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
-                        log_dict["duration_loss_weight"] = actual_weight
-                                            
                     if dur_mae is not None:
                         log_dict["duration_mae"] = dur_mae.item()
+                    
+                    # Add alignment metrics to logging if available
+                    if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
+                        coverage = alignment_utils.calculate_coverage(self.previous_alignment)
+                        diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
+                        log_dict["coverage_score"] = coverage
+                        log_dict["diagonal_score"] = diagonal
+                        if hasattr(self.alignment_manager, 'current_method'):
+                            log_dict["alignment_method"] = self.alignment_manager.current_method
                     
                     self.accelerator.log(log_dict, step=global_update)
                     
@@ -1225,13 +1332,19 @@ class Trainer:
                         self.writer.add_scalar("loss", loss.item(), global_update)
                         if dur_loss is not None:
                             self.writer.add_scalar("duration_loss", dur_loss.item(), global_update)
-                            
-                            # Use same direct approach for tensorboard
-                            actual_weight = self.duration_focus_weight if self.duration_focus_phase else self.base_duration_loss_weight
-                            self.writer.add_scalar("duration_loss_weight", actual_weight, global_update)
+                            self.writer.add_scalar("duration_loss_weight", self.active_duration_loss_weight, global_update)
                         
                         if dur_mae is not None:
                             self.writer.add_scalar("duration_mae", dur_mae.item(), global_update)
+                        
+                        # Add alignment metrics to TensorBoard if available
+                        if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
+                            coverage = alignment_utils.calculate_coverage(self.previous_alignment)
+                            diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
+                            self.writer.add_scalar("coverage_score", coverage, global_update)
+                            self.writer.add_scalar("diagonal_score", diagonal, global_update)
+                            if hasattr(self.alignment_manager, 'current_method'):
+                                self.writer.add_text("alignment_method", self.alignment_manager.current_method, global_update)
                         
                         self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
                 

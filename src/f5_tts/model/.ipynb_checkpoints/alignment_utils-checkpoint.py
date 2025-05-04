@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from viphoneme import vi2IPA
 from tqdm import tqdm
+import math
 
 def text_to_phonemes(text):
     """
@@ -34,7 +35,7 @@ def text_to_phonemes(text):
     return vi2IPA(str(text).strip().split(" "))
 
 from phonemizer import phonemize
-def text_to_phonemes_espeak(text):
+def text_to_phonemes_espeak(text_input):
 
     phoneme_seq = []
     # Step 1: Convert text to phonemes using phonemizer instead of viphoneme
@@ -148,194 +149,9 @@ def phonemes_to_mel_alignment(phoneme_tensor, phoneme_mask, mel_spec, model):
     
     return alignment, similarity
 
-def viterbi_monotonic_alignment_search(similarity_matrix):
-    b, nt, mel_len = similarity_matrix.shape
-    device = similarity_matrix.device
-    
-    # Vectorized Viterbi forward pass
-    path_prob = torch.zeros((b, nt, mel_len), device=device)
-    path_prob[:, 0, 0] = similarity_matrix[:, 0, 0]
-    
-    # Tính toán ma trận path cộng dồn hoàn toàn vector hóa
-    for n in range(nt):
-        if n > 0:
-            # Lan truyền theo chiều dọc
-            path_prob[:, n, 0] = path_prob[:, n-1, 0] + similarity_matrix[:, n, 0]
-        
-        # Lan truyền theo chiều ngang (vectorized cho tất cả batch)
-        for t in range(1, mel_len):
-            if n == 0:
-                path_prob[:, 0, t] = path_prob[:, 0, t-1] + similarity_matrix[:, 0, t]
-            else:
-                path_prob[:, n, t] = similarity_matrix[:, n, t] + torch.maximum(
-                    path_prob[:, n-1, t], path_prob[:, n, t-1]
-                )
-    
-    # Tạo alignments nhanh với hàm chunk
-    alignments = torch.zeros_like(similarity_matrix)
-    
-    # Backtracking với đoạn văn bản cho mỗi batch
-    boundaries = torch.zeros((b, nt), dtype=torch.long, device=device)
-    
-    # Vector hóa tìm điểm tốt nhất cho phân đoạn
-    for i in range(b):
-        curr_mel_idx = mel_len - 1
-        
-        # Đi từ cuối lên, tìm boundary tối ưu
-        for n in range(nt-1, -1, -1):
-            cost_right = path_prob[i, n, curr_mel_idx]
-            
-            if n == 0:
-                boundary_idx = 0
-            else:
-                # Tìm vị trí tốt nhất dựa trên gradient của path probability
-                costs = path_prob[i, n, :curr_mel_idx+1]
-                gradient = costs[1:] - costs[:-1]
-                boundary_candidates = torch.where(gradient > 0)[0]
-                
-                if len(boundary_candidates) > 0:
-                    boundary_idx = boundary_candidates[-1].item()
-                else:
-                    boundary_idx = 0
-            
-            # Đánh dấu từ boundary tới curr_mel_idx
-            alignments[i, n, boundary_idx:curr_mel_idx+1] = 1
-            boundaries[i, n] = boundary_idx
-            curr_mel_idx = boundary_idx - 1
-            
-            if curr_mel_idx < 0:
-                break
-    
-    return alignments
-
-def windowed_monotonic_alignment(similarity_matrix, window_size=0.2):
-    b, nt, mel_len = similarity_matrix.shape
-    device = similarity_matrix.device
-    
-    # Khởi tạo alignment
-    alignments = torch.zeros_like(similarity_matrix)
-    
-    # Tính toán với cửa sổ tối ưu
-    actual_window = max(2, int(mel_len * window_size))
-    
-    for i in range(b):
-        # Tính tỷ lệ trung bình
-        frames_per_phone = mel_len / nt
-        
-        # Bắt đầu từ 0
-        start_idx = 0
-        
-        # Xử lý tất cả phoneme trừ cái cuối
-        for n in range(nt - 1):
-            # Tính vị trí dự kiến
-            expected_end = int((n + 1) * frames_per_phone)
-            
-            # Xác định cửa sổ tìm kiếm quanh vị trí dự kiến
-            window_start = max(start_idx, expected_end - actual_window)
-            window_end = min(mel_len - 1, expected_end + actual_window)
-            
-            # Tính score chỉ trong cửa sổ, giúp tăng tốc đáng kể
-            sub_scores = similarity_matrix[i, n, window_start:window_end+1]
-            best_offset = torch.argmax(sub_scores).item()
-            best_end = window_start + best_offset
-            
-            # Đánh dấu alignment
-            alignments[i, n, start_idx:best_end+1] = 1
-            
-            # Cập nhật vị trí bắt đầu cho phoneme tiếp theo
-            start_idx = best_end + 1
-            
-            if start_idx >= mel_len:
-                break
-        
-        # Xử lý phoneme cuối cùng
-        if start_idx < mel_len:
-            alignments[i, -1, start_idx:] = 1
-    
-    return alignments
-
-def progressive_monotonic_alignment(similarity_matrix):
-    b, nt, mel_len = similarity_matrix.shape
-    device = similarity_matrix.device
-    
-    # Bước 1: Tạo alignment thô dựa trên tỷ lệ đều
-    alignments = torch.zeros_like(similarity_matrix)
-    
-    for i in range(b):
-        # Chia đều frames
-        boundaries = torch.linspace(0, mel_len, nt+1).long()
-        
-        # Gán segment theo phoneme
-        for n in range(nt):
-            start = boundaries[n]
-            end = boundaries[n+1]
-            if start < end:  # Đảm bảo không có segment rỗng
-                alignments[i, n, start:end] = 1
-    
-    # Bước 2: Tinh chỉnh alignment với vài vòng tối ưu
-    refinement_steps = 2  # Số bước tinh chỉnh (thấp = nhanh)
-    
-    # Lưu trữ entropy ban đầu
-    total_score = torch.sum(similarity_matrix * alignments)
-    
-    for _ in range(refinement_steps):
-        for i in range(b):
-            for n in range(nt-1):
-                # Tìm boundary giữa phoneme n và n+1
-                boundary = None
-                for t in range(mel_len):
-                    if t < mel_len-1 and alignments[i, n, t] == 1 and alignments[i, n, t+1] == 0:
-                        boundary = t
-                        break
-                
-                if boundary is not None:
-                    # Thử dịch boundary sang trái/phải và chọn cấu hình tốt nhất
-                    shift_range = min(5, mel_len // 20)  # Giới hạn phạm vi dịch chuyển
-                    best_score = total_score
-                    best_shift = 0
-                    
-                    for shift in range(-shift_range, shift_range + 1):
-                        new_boundary = boundary + shift
-                        if 0 <= new_boundary < mel_len-1:
-                            # Tạo alignment thử
-                            test_alignment = alignments[i].clone()
-                            
-                            # Thay đổi boundary
-                            if shift < 0:  # Dịch sang trái: gán thêm frames cho phoneme n+1
-                                test_alignment[n, new_boundary+1:boundary+1] = 0
-                                test_alignment[n+1, new_boundary+1:boundary+1] = 1
-                            elif shift > 0:  # Dịch sang phải: gán thêm frames cho phoneme n
-                                test_alignment[n, boundary+1:new_boundary+1] = 1
-                                test_alignment[n+1, boundary+1:new_boundary+1] = 0
-                            
-                            # Tính score mới
-                            new_score = torch.sum(similarity_matrix[i] * test_alignment)
-                            
-                            if new_score > best_score:
-                                best_score = new_score
-                                best_shift = shift
-                    
-                    # Áp dụng shift tốt nhất
-                    if best_shift != 0:
-                        new_boundary = boundary + best_shift
-                        if best_shift < 0:  # Dịch sang trái
-                            alignments[i, n, new_boundary+1:boundary+1] = 0
-                            alignments[i, n+1, new_boundary+1:boundary+1] = 1
-                        else:  # Dịch sang phải
-                            alignments[i, n, boundary+1:new_boundary+1] = 1
-                            alignments[i, n+1, boundary+1:new_boundary+1] = 0
-                        
-                        # Cập nhật tổng score
-                        total_score = best_score
-    
-    return alignments
-
-# Tạo file riêng cho các giải thuật alignment
-# File: alignment_algorithms.py
-
 import torch
 
-def viterbi_monotonic_alignment_search(similarity_matrix):
+def viterbi_vectorized_alignment(similarity_matrix):
     b, nt, mel_len = similarity_matrix.shape
     device = similarity_matrix.device
     
@@ -518,7 +334,7 @@ def progressive_monotonic_alignment(similarity_matrix):
     return alignments
     
 # Hàm lựa chọn giải thuật dựa trên tham số
-def monotonic_alignment_search(similarity_matrix, algorithm="window"):
+def monotonic_alignment_search(similarity_matrix, algorithm="viterbi"): # viterbi window progressive
     """
     Hàm gọi một trong các giải thuật căn chỉnh monotonic dựa trên tham số.
     
@@ -537,3 +353,257 @@ def monotonic_alignment_search(similarity_matrix, algorithm="window"):
         return progressive_monotonic_alignment(similarity_matrix)
     else:
         raise ValueError(f"Không hỗ trợ giải thuật: {algorithm}. Chọn một trong các giải thuật: 'viterbi', 'window', 'progressive'")
+
+import torch
+import numpy as np
+import math
+
+def calculate_diagonal_score(alignment):
+    """
+    Tính toán độ tập trung của alignment theo đường chéo.
+    
+    Args:
+        alignment: Tensor [B, T, M] - alignment matrix
+        
+    Returns:
+        score: Scalar - điểm tập trung theo đường chéo (0-1)
+    """
+    B, T, M = alignment.shape
+    device = alignment.device
+    scores = []
+    
+    for b in range(B):
+        # Tạo "đường chéo lý tưởng"
+        ideal_path = torch.zeros_like(alignment[b])
+        for t in range(T):
+            m = min(int(t * M / T), M-1)
+            ideal_path[t, m] = 1
+        
+        # So sánh với alignment thực tế
+        overlap = (alignment[b] * ideal_path).sum()
+        total = alignment[b].sum()
+        
+        # Tính điểm (0-1, càng cao càng tốt)
+        score = overlap / total if total > 0 else 0
+        scores.append(score)
+    
+    return sum(scores) / len(scores)
+
+def calculate_coverage(alignment):
+    """
+    Tính % mel frames được phân bổ.
+    
+    Args:
+        alignment: Tensor [B, T, M] - alignment matrix
+        
+    Returns:
+        coverage: Scalar - tỉ lệ frames được phân bổ (0-1)
+    """
+    # Tính tổng theo chiều phoneme
+    mel_coverage = torch.sum(alignment, dim=1)  # [B, M]
+    
+    # Tính % mel frames có ít nhất một phoneme được phân bổ
+    covered = (mel_coverage > 0).float()
+    coverage = torch.mean(covered)
+    
+    return coverage
+
+class AlignmentMethodManager:
+    """
+    Quản lý phương pháp alignment và chuyển đổi giữa các phương pháp
+    dựa trên tiến trình huấn luyện và chất lượng alignment.
+    """
+    def __init__(self):
+        # Trạng thái training
+        self.current_method = "window"  # Bắt đầu với window
+        self.phase = 1  # Phase 1: Dur Pred training, Phase 2: Full model
+        
+        # Metrics tracking với EMA
+        self.ema_alpha = 0.2  # Hệ số EMA
+        self.coverage_ema = 0.0
+        self.diagonal_ema = 0.0
+        
+        # Ngưỡng chuyển đổi
+        self.coverage_threshold = 0.92  # Coverage threshold cho Viterbi
+        self.diagonal_threshold = 0.65  # Diagonal threshold cho Viterbi
+        
+        # Theo dõi EMA
+        self.metrics_history = {
+            'coverage': [],
+            'diagonal': [],
+            'coverage_ema': [],
+            'diagonal_ema': []
+        }
+        
+        # Counter để xác định sự ổn định
+        self.stability_counter = 0
+        self.required_stable_checks = 3  # Số lần kiểm tra liên tiếp cần thiết
+        
+        # Decay settings for duration weight
+        self.initial_dur_weight = 1.5
+        self.target_dur_weight = 0.1
+        self.max_decay_steps = 10000  # Số bước để giảm từ initial đến target
+        
+    def update_ema_metrics(self, coverage, diagonal):
+        """
+        Cập nhật metrics với Exponential Moving Average
+        """
+        if self.coverage_ema == 0.0:  # Initialization
+            self.coverage_ema = coverage
+            self.diagonal_ema = diagonal
+        else:
+            self.coverage_ema = self.ema_alpha * coverage + (1 - self.ema_alpha) * self.coverage_ema
+            self.diagonal_ema = self.ema_alpha * diagonal + (1 - self.ema_alpha) * self.diagonal_ema
+        
+        # Thêm vào lịch sử
+        self.metrics_history['coverage'].append(coverage)
+        self.metrics_history['diagonal'].append(diagonal)
+        self.metrics_history['coverage_ema'].append(self.coverage_ema)
+        self.metrics_history['diagonal_ema'].append(self.diagonal_ema)
+        
+        return self.coverage_ema, self.diagonal_ema
+    
+    def should_transition_to_phase2(self, global_update, duration_focus_updates):
+        """
+        Kiểm tra xem có nên chuyển từ Phase 1 sang Phase 2 hay không.
+        Chỉ dựa vào số bước huấn luyện như yêu cầu.
+        
+        Args:
+            global_update: Số bước huấn luyện hiện tại
+            duration_focus_updates: Ngưỡng bước tối đa cho Phase 1
+        
+        Returns:
+            should_transition: Boolean - có nên chuyển Phase hay không
+            reason: String - lý do chuyển Phase
+        """
+        if global_update >= duration_focus_updates:
+            return True, f"Reached maximum duration focus updates: {duration_focus_updates}"
+        return False, "Continuing Phase 1"
+    
+    def should_switch_to_viterbi(self, coverage, diagonal):
+        """
+        Kiểm tra xem có nên chuyển từ Progressive sang Viterbi hay không
+        dựa trên coverage và diagonal score.
+        
+        Args:
+            coverage: Coverage score hiện tại
+            diagonal: Diagonal score hiện tại
+            
+        Returns:
+            should_switch: Boolean - có nên chuyển sang Viterbi hay không
+            reason: String - lý do chuyển phương pháp
+        """
+        # Chỉ xem xét chuyển sang Viterbi trong Phase 2
+        if self.phase != 2 or self.current_method == "viterbi":
+            return False, "Not in Phase 2 or already using Viterbi"
+        
+        # Cập nhật EMA
+        coverage_ema, diagonal_ema = self.update_ema_metrics(coverage, diagonal)
+        
+        # Kiểm tra ngưỡng
+        if coverage_ema >= self.coverage_threshold and diagonal_ema >= self.diagonal_threshold:
+            self.stability_counter += 1
+            
+            if self.stability_counter >= self.required_stable_checks:
+                return True, f"Stable metrics achieved: Coverage={coverage_ema:.3f}, Diagonal={diagonal_ema:.3f}"
+        else:
+            # Reset counter nếu metrics không đạt ngưỡng
+            self.stability_counter = 0
+        
+        return False, f"Current metrics: Coverage={coverage_ema:.3f}/{self.coverage_threshold}, Diagonal={diagonal_ema:.3f}/{self.diagonal_threshold}, Stable checks: {self.stability_counter}/{self.required_stable_checks}"
+    
+    def get_current_method(self):
+        """
+        Trả về phương pháp alignment hiện tại.
+        """
+        return self.current_method
+    
+    def transition_to_phase2(self):
+        """
+        Chuyển từ Phase 1 sang Phase 2.
+        """
+        self.phase = 2
+        self.current_method = "progressive"  # Chuyển sang progressive ngay lập tức
+        return f"Transitioned to Phase 2 with Progressive alignment method"
+    
+    def switch_to_viterbi(self):
+        """
+        Chuyển từ Progressive sang Viterbi.
+        """
+        self.current_method = "viterbi"
+        return f"Switched to Viterbi alignment method"
+    
+    def calculate_duration_weight(self, steps_in_phase2):
+        """
+        Tính toán duration weight theo cosine decay.
+        
+        Args:
+            steps_in_phase2: Số bước đã thực hiện trong Phase 2
+            
+        Returns:
+            weight: Duration loss weight hiện tại
+        """
+        if self.phase == 1:
+            return self.initial_dur_weight
+        
+        # Giới hạn số bước decay
+        steps = min(steps_in_phase2, self.max_decay_steps)
+        
+        # Cosine decay từ initial đến target
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * steps / self.max_decay_steps))
+        weight = self.target_dur_weight + (self.initial_dur_weight - self.target_dur_weight) * cosine_decay
+        
+        return weight
+
+def get_alignment_method(manager, global_update, duration_focus_updates=12000, 
+                         coverage=None, diagonal=None, phase2_start_update=None):
+    """
+    Quyết định phương pháp alignment dựa trên tiến trình huấn luyện.
+    
+    Args:
+        manager: AlignmentMethodManager instance
+        global_update: Số bước huấn luyện hiện tại
+        duration_focus_updates: Ngưỡng bước tối đa cho Phase 1
+        coverage: Coverage score (nếu có)
+        diagonal: Diagonal score (nếu có)
+        phase2_start_update: Bước bắt đầu Phase 2 (nếu đã trong Phase 2)
+        
+    Returns:
+        method: String - phương pháp alignment ("window", "progressive", "viterbi")
+        logs: Dict - thông tin logging
+    """
+    logs = {
+        'phase': manager.phase,
+        'method': manager.current_method,
+        'coverage': coverage,
+        'diagonal': diagonal
+    }
+    
+    # Xử lý chuyển Phase 1 -> Phase 2
+    if manager.phase == 1:
+        should_transition, reason = manager.should_transition_to_phase2(global_update, duration_focus_updates)
+        if should_transition:
+            manager.transition_to_phase2()
+            logs['phase_transition'] = True
+            logs['transition_reason'] = reason
+    
+    # Xử lý chuyển Progressive -> Viterbi trong Phase 2
+    if manager.phase == 2 and coverage is not None and diagonal is not None:
+        should_switch, reason = manager.should_switch_to_viterbi(coverage, diagonal)
+        if should_switch:
+            manager.switch_to_viterbi()
+            logs['method_switch'] = True
+            logs['switch_reason'] = reason
+    
+    # Tính duration weight nếu đang ở Phase 2
+    if manager.phase == 2 and phase2_start_update is not None:
+        steps_in_phase2 = global_update - phase2_start_update
+        duration_weight = manager.calculate_duration_weight(steps_in_phase2)
+        logs['duration_weight'] = duration_weight
+    else:
+        logs['duration_weight'] = manager.initial_dur_weight
+    
+    return manager.get_current_method(), logs
+
+
+    
