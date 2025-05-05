@@ -89,12 +89,14 @@ def parse_args():
     parser.add_argument("--log_samples", action="store_true", help="Log inferenced audio samples during training.")
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no","fp16","bf16"],
                         help="Mixed precision mode for Accelerate")
-    parser.add_argument("--use_duration_predictor", action="store_true", default=True, 
+    parser.add_argument("--use_duration_predictor", action="store_true", default=False, 
                         help="Enable training of duration predictor during distillation")
-    parser.add_argument("--duration_loss_weight", type=float, default=0.5, 
+    parser.add_argument("--duration_loss_weight", type=float, default=None, 
                         help="Weight for duration prediction loss")    
     parser.add_argument("--resume_epoch", type=float, default=None,
                         help="Resume from specific epoch")    
+    parser.add_argument("--from_scratch", action="store_true", default=False,
+                        help="From scratch")    
 
     parser.add_argument("--ref_texts", type=str, nargs="+", default=None, help="Reference texts for sample generation")
     parser.add_argument("--ref_audio_paths", type=str, nargs="+", default=None, help="Paths to reference audio files")
@@ -710,11 +712,18 @@ def main():
     student_model = CFM(transformer=student_model_cls(**student_model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels), mel_spec_module=mel_spec_module, vocab_char_map=vocab_char_map)
 
     # STEVE: Duration Predictor - all process, not only main process
-    from f5_tts.model.duration_predictor import DurationPredictor  # Add this local import
-    student_duration_predictor = DurationPredictor(vocab_size, 512, 32, 3, 0.5)
-    setattr(student_model, 'duration_predictor', student_duration_predictor)
-    accelerator.print("Duration predictor added to student model")
-  
+    # Only add duration predictor if the flag is set
+    if args.use_duration_predictor:
+        from f5_tts.model.duration_predictor import DurationPredictor
+        student_duration_predictor = DurationPredictor(vocab_size, 512, 32, 3, 0.5)
+        setattr(student_model, 'duration_predictor', student_duration_predictor)
+        accelerator.print("Duration predictor added to student model")
+    else:
+        # Remove duration predictor if it exists
+        if hasattr(student_model, 'duration_predictor'):
+            delattr(student_model, 'duration_predictor')
+            accelerator.print("Duration predictor removed from student model")
+            
     # --- Load Teacher Checkpoint (to accelerator.device) ---
     accelerator.print(f"Loading Teacher checkpoint: {args.teacher_ckpt_path}")
     teacher_load_success = load_model_checkpoint(teacher_model, args.teacher_ckpt_path, accelerator.device, accelerator)
@@ -725,19 +734,61 @@ def main():
 
     # --- Prepare Initial Student Checkpoint Path (Copy if needed) ---
     initial_student_ckpt_path_for_loading = args.student_init_ckpt_path
-    if args.student_init_ckpt_path and os.path.exists(args.student_init_ckpt_path):
+    if (not args.from_scratch) and args.student_init_ckpt_path and os.path.exists(args.student_init_ckpt_path):
         if not os.path.isdir(args.output_dir): os.makedirs(args.output_dir, exist_ok=True)
         source_ckpt_basename = os.path.basename(args.student_init_ckpt_path)
         target_basename = "pretrained_" + source_ckpt_basename if not source_ckpt_basename.startswith("pretrained_") else source_ckpt_basename
         copied_checkpoint_path = os.path.join(args.output_dir, target_basename)
+        
+        # Check if the file exists and verify it's valid
+        if os.path.isfile(copied_checkpoint_path):
+            try:
+                # Test if file is valid by attempting to read header
+                with open(copied_checkpoint_path, 'rb') as f:
+                    # Just read a small chunk to see if file is accessible
+                    header = f.read(8)
+                accelerator.print(f"Using existing copied checkpoint: {copied_checkpoint_path}")
+                initial_student_ckpt_path_for_loading = copied_checkpoint_path
+            except Exception as e:
+                accelerator.print(f"Warning: Existing checkpoint appears corrupted: {e}. Will create fresh copy.")
+                try:
+                    os.remove(copied_checkpoint_path)
+                except Exception:
+                    pass
+                # Force recopy below
+                copied_checkpoint_path = None
+        
+        # Copy file using block-by-block approach to avoid memory issues
         if not os.path.isfile(copied_checkpoint_path):
-             accelerator.print(f"Copying initial student checkpoint to: {copied_checkpoint_path}")
-             try: shutil.copy2(args.student_init_ckpt_path, copied_checkpoint_path); initial_student_ckpt_path_for_loading = copied_checkpoint_path
-             except Exception as e: accelerator.print(f"Warning: Error copying checkpoint: {e}. Using original path.")
-        else: accelerator.print(f"Using existing copied checkpoint: {copied_checkpoint_path}"); initial_student_ckpt_path_for_loading = copied_checkpoint_path
-
+            accelerator.print(f"Copying initial student checkpoint to: {copied_checkpoint_path}")
+            try:
+                # More robust file copying with block reading/writing
+                with open(args.student_init_ckpt_path, 'rb') as src_file:
+                    with open(copied_checkpoint_path, 'wb') as dst_file:
+                        # Copy in chunks of 10MB
+                        chunk_size = 10 * 1024 * 1024  
+                        while True:
+                            chunk = src_file.read(chunk_size)
+                            if not chunk:
+                                break
+                            dst_file.write(chunk)
+                
+                # Verify copied file size matches source
+                src_size = os.path.getsize(args.student_init_ckpt_path)
+                dst_size = os.path.getsize(copied_checkpoint_path)
+                
+                if src_size == dst_size:
+                    accelerator.print(f"Successfully copied checkpoint ({dst_size} bytes)")
+                    initial_student_ckpt_path_for_loading = copied_checkpoint_path
+                else:
+                    accelerator.print(f"Warning: Copied file size mismatch ({src_size} vs {dst_size}). Using original path.")
+                    initial_student_ckpt_path_for_loading = args.student_init_ckpt_path
+            except Exception as e:
+                accelerator.print(f"Warning: Error copying checkpoint: {e}. Using original path.")
+                initial_student_ckpt_path_for_loading = args.student_init_ckpt_path
+                
     # --- Load Initial Student State (if provided, into raw model on CPU) ---
-    if initial_student_ckpt_path_for_loading:
+    if (not args.from_scratch) and initial_student_ckpt_path_for_loading:
         accelerator.print(f"Loading initial Student state from: {initial_student_ckpt_path_for_loading} (before prepare)")
         student_load_success = load_model_checkpoint(student_model, initial_student_ckpt_path_for_loading, torch.device("cpu"), accelerator)
         if not student_load_success: accelerator.print("[Warning] Failed to load initial student checkpoint. Starting fresh.")
@@ -770,7 +821,7 @@ def main():
         except ImportError: accelerator.print("[Warning] bitsandbytes not found. Falling back to AdamW.")
     
     # Create separate parameter groups for duration predictor and the rest of the model
-    if hasattr(student_model, 'duration_predictor') and student_model.duration_predictor is not None:
+    if args.use_duration_predictor and hasattr(student_model, 'duration_predictor') and student_model.duration_predictor is not None:
         # Get duration predictor parameters
         duration_params = list(student_model.duration_predictor.parameters())
         
@@ -1023,7 +1074,7 @@ def main():
                     total_loss = (1.0 - alpha) * student_loss + alpha * distill_loss
                     
                     # In the loss calculation section:
-                    if hasattr(unwrapped_student_model, 'duration_predictor') and unwrapped_student_model.duration_predictor is not None and 'attn' in batch:
+                    if args.use_duration_predictor and hasattr(unwrapped_student_model, 'duration_predictor') and unwrapped_student_model.duration_predictor is not None and 'attn' in batch:
                         text_tokens = text_tensor_input
                         b, nt = text_tokens.shape
                         text_lengths = batch.get("text_lengths", torch.full((b,), nt, device=device))
