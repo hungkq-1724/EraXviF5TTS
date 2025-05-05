@@ -2,8 +2,6 @@
   <img src="https://cdn-uploads.huggingface.co/production/uploads/63d8d8879dfcfa941d4d7cd9/GsQKdaTyn2FFx_cZvVHk3.png" alt="Logo">
 </p>
 
-# Updated May 3, 2025: Complete overhaul of training methodology with phoneme-based duration prediction for superior speech quality
-
 # Introduce an Highly Enhanced F5-TTS fully open source.
 
 **MIT license** for everything except if you use the **pretrained F5-TTS model**, then you are bound with Emilia dataset which is under **BY-NC 4.0 license**. 
@@ -13,85 +11,6 @@
 This repository is a significantly enhanced fork of the original F5-TTS project. We have introduced several major improvements and features, focusing on model efficiency, training stability, and output quality. Key additions include advanced pruning techniques, a sophisticated duration predictor, improved checkpointing, knowledge distillation capabilities, and the option to train models entirely from scratch.
 
 I'll rewrite that specific section of your document in a more professional style for a model card. Here's a polished English version:
-
-## Advanced Training Strategy with Phoneme-Based Duration Prediction
-
-Our implementation fundamentally improves upon the original F5-TTS architecture by introducing a phoneme-level duration predictor that significantly enhances naturalness and articulation clarity.
-
-### Phoneme Preprocessing Pipeline
-
-1. **Phonemization Setup**:
-   - The system utilizes an enhanced phonemizer library with espeak language support to convert text into phonemic representations
-   - All preprocessed phonemes are stored in a structured `phonemes_metadata.jsonl` file
-
-2. **Prerequisites**:
-   ```bash
-   # Install required system dependencies
-   sudo apt-get install festival espeak-ng mbrola
-   
-   # Use our recommended high-performance phonemizer fork
-   git clone https://github.com/thewh1teagle/phonemizer-fork.git
-   cd phonemizer-fork
-   pip install .
-   ```
-
-3. **Generating Phoneme Data**:
-   ```bash
-   # Change path to your metadata.csv and path to output phonemes_metadata.jsonl
-   # Execute preprocessing script
-   python /path/to/f5_tts/model/preprocess_phoneme.py
-   ```
-   This process creates a comprehensive `phonemes_metadata.jsonl` file in your designated data directory. Run F5-TTS Gradio to extend vocab/prepare data (validate audio files and generate `duration.json` & `raw.arrow`) normally, the new codes will leverage this `phonemes_metadata.jsonl` instead of origin `metadata.csv` file.
-
-### Optimized Training Approach
-
-Our training strategy implements a two-phase process:
-
-1. **Duration Predictor Warm-up Phase**: 
-   - Use Dynamic Programming Window algo to calculate monotonic alignment to balance training speed & quality. You can also try Viterbi Vectorized (also fast but lower quality) or Progressive Refinement (a bit higher quality but much slower); all are in the model/alignment_utils.py
-   - Initial 3 epochs focus on training the duration predictor while freezing audio model parameters
-   - This approach ensures stability and prevents initial training divergence
-
-2. **Full Model Fine-tuning**:
-   - Following warm-up, all model parameters are unfrozen for comprehensive optimization
-   - A dedicated TensorBoard dashboard tracks duration loss metrics alongside other model performance indicators
-
-3. **Model Persistence**:
-   - The duration predictor is saved as a separate model component for portability
-   - This allows for flexible reuse across different model configurations
-
-### Example Training Configuration with 1.2 million/female-only samples w/ only 2xRTX3090 24G GPUs. The model was pruned from 22 to 12 layers and then trained from scratch.
-
-```bash
-accelerate launch --mixed_precision=bf16 /path/to/f5_tts/train/finetune_cli.py \
-  --exp_name F5TTS_Phoneme_Duration_Model \
-  --learning_rate 2e-4 \
-  --weight_decay 0.001 \
-  --batch_size_per_gpu 16384 \
-  --batch_size_type frame \
-  --max_samples 64 \
-  --grad_accumulation_steps 4 \
-  --max_grad_norm 1.0 \
-  --duration_focus_updates 12000 \
-  --duration_focus_weight 1.5 \
-  --use_duration_predictor \
-  --duration_loss_weight 0.5 \
-  --epochs 300 \
-  --num_warmup_updates 32000 \
-  --save_per_updates 3000 \
-  --keep_last_n_checkpoints 50 \
-  --last_per_updates 3000 \
-  --dataset_name vietnamese_tts_dataset \
-  --tokenizer char \
-  --logger tensorboard \
-  --log_samples \
-  --from_scratch \
-  --ref_audio_paths "/path/to/reference/samples/female-reference.wav" \
-  --ref_texts "Phoneme training reference text with natural pronunciation patterns." \
-  --ref_sample_text_prompts "Example text for evaluating model performance during training."
-```
-
-This phoneme-based duration prediction approach resolves common TTS artifacts including word skipping, unnatural pauses, and unclear articulation, resulting in significantly more natural speech synthesis.
 
 ### ✨ Model Pruning ✨
 
