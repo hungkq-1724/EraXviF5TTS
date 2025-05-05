@@ -358,228 +358,94 @@ import torch
 import numpy as np
 import math
 
-def calculate_diagonal_score(alignment):
-    """
-    Tính toán độ tập trung của alignment theo đường chéo.
-    
-    Args:
-        alignment: Tensor [B, T, M] - alignment matrix
-        
-    Returns:
-        score: Scalar - điểm tập trung theo đường chéo (0-1)
-    """
-    B, T, M = alignment.shape
-    device = alignment.device
-    scores = []
-    
-    for b in range(B):
-        # Tạo "đường chéo lý tưởng"
-        ideal_path = torch.zeros_like(alignment[b])
-        for t in range(T):
-            m = min(int(t * M / T), M-1)
-            ideal_path[t, m] = 1
-        
-        # So sánh với alignment thực tế
-        overlap = (alignment[b] * ideal_path).sum()
-        total = alignment[b].sum()
-        
-        # Tính điểm (0-1, càng cao càng tốt)
-        score = overlap / total if total > 0 else 0
-        scores.append(score)
-    
-    return sum(scores) / len(scores)
-
-def calculate_coverage(alignment):
-    """
-    Tính % mel frames được phân bổ.
-    
-    Args:
-        alignment: Tensor [B, T, M] - alignment matrix
-        
-    Returns:
-        coverage: Scalar - tỉ lệ frames được phân bổ (0-1)
-    """
-    # Tính tổng theo chiều phoneme
-    mel_coverage = torch.sum(alignment, dim=1)  # [B, M]
-    
-    # Tính % mel frames có ít nhất một phoneme được phân bổ
-    covered = (mel_coverage > 0).float()
-    coverage = torch.mean(covered)
-    
-    return coverage
-
 class AlignmentMethodManager:
     """
-    Quản lý phương pháp alignment và chuyển đổi giữa các phương pháp
-    dựa trên tiến trình huấn luyện và chất lượng alignment.
+    Simple alignment method manager that transitions based on training phase and epoch.
     """
     def __init__(self):
-        # Trạng thái training
-        self.current_method = "window"  # Bắt đầu với window
+        # Training state
+        self.current_method = "window"  # Start with window
         self.phase = 1  # Phase 1: Dur Pred training, Phase 2: Full model
         
-        # Metrics tracking với EMA
-        self.ema_alpha = 0.2  # Hệ số EMA
-        self.coverage_ema = 0.0
-        self.diagonal_ema = 0.0
-        
-        # Ngưỡng chuyển đổi
-        self.coverage_threshold = 0.92  # Coverage threshold cho Viterbi
-        self.diagonal_threshold = 0.65  # Diagonal threshold cho Viterbi
-        
-        # Theo dõi EMA
-        self.metrics_history = {
-            'coverage': [],
-            'diagonal': [],
-            'coverage_ema': [],
-            'diagonal_ema': []
-        }
-        
-        # Counter để xác định sự ổn định
-        self.stability_counter = 0
-        self.required_stable_checks = 3  # Số lần kiểm tra liên tiếp cần thiết
-        
-        # Decay settings for duration weight
-        self.initial_dur_weight = 1.5
+        # Duration weight settings
+        self.initial_dur_weight = 0.5
         self.target_dur_weight = 0.1
-        self.max_decay_steps = 10000  # Số bước để giảm từ initial đến target
+        self.decay_epochs = 10
+        self.max_decay_steps = None  # Will decay weight from self.initial_dur_weight to 0.1
         
-    def update_ema_metrics(self, coverage, diagonal):
+        # Epoch threshold for Viterbi
+        self.viterbi_start_epoch = 3
+        
+    def set_steps_per_epoch(self, steps_per_epoch):
         """
-        Cập nhật metrics với Exponential Moving Average
+        Sets the max_decay_steps based on actual steps per epoch.
         """
-        if self.coverage_ema == 0.0:  # Initialization
-            self.coverage_ema = coverage
-            self.diagonal_ema = diagonal
-        else:
-            self.coverage_ema = self.ema_alpha * coverage + (1 - self.ema_alpha) * self.coverage_ema
-            self.diagonal_ema = self.ema_alpha * diagonal + (1 - self.ema_alpha) * self.diagonal_ema
-        
-        # Thêm vào lịch sử
-        self.metrics_history['coverage'].append(coverage)
-        self.metrics_history['diagonal'].append(diagonal)
-        self.metrics_history['coverage_ema'].append(self.coverage_ema)
-        self.metrics_history['diagonal_ema'].append(self.diagonal_ema)
-        
-        return self.coverage_ema, self.diagonal_ema
+        self.max_decay_steps = steps_per_epoch * self.decay_epochs
+        return self.max_decay_steps
     
     def should_transition_to_phase2(self, global_update, duration_focus_updates):
         """
-        Kiểm tra xem có nên chuyển từ Phase 1 sang Phase 2 hay không.
-        Chỉ dựa vào số bước huấn luyện như yêu cầu.
-        
-        Args:
-            global_update: Số bước huấn luyện hiện tại
-            duration_focus_updates: Ngưỡng bước tối đa cho Phase 1
-        
-        Returns:
-            should_transition: Boolean - có nên chuyển Phase hay không
-            reason: String - lý do chuyển Phase
+        Check if we should transition from Phase 1 to Phase 2.
         """
         if global_update >= duration_focus_updates:
-            return True, f"Reached maximum duration focus updates: {duration_focus_updates}"
+            return True, f"Reached duration focus updates: {duration_focus_updates}"
         return False, "Continuing Phase 1"
-    
-    def should_switch_to_viterbi(self, coverage, diagonal):
-        """
-        Kiểm tra xem có nên chuyển từ Progressive sang Viterbi hay không
-        dựa trên coverage và diagonal score.
-        
-        Args:
-            coverage: Coverage score hiện tại
-            diagonal: Diagonal score hiện tại
-            
-        Returns:
-            should_switch: Boolean - có nên chuyển sang Viterbi hay không
-            reason: String - lý do chuyển phương pháp
-        """
-        # Chỉ xem xét chuyển sang Viterbi trong Phase 2
-        if self.phase != 2 or self.current_method == "viterbi":
-            return False, "Not in Phase 2 or already using Viterbi"
-        
-        # Cập nhật EMA
-        coverage_ema, diagonal_ema = self.update_ema_metrics(coverage, diagonal)
-        
-        # Kiểm tra ngưỡng
-        if coverage_ema >= self.coverage_threshold and diagonal_ema >= self.diagonal_threshold:
-            self.stability_counter += 1
-            
-            if self.stability_counter >= self.required_stable_checks:
-                return True, f"Stable metrics achieved: Coverage={coverage_ema:.3f}, Diagonal={diagonal_ema:.3f}"
-        else:
-            # Reset counter nếu metrics không đạt ngưỡng
-            self.stability_counter = 0
-        
-        return False, f"Current metrics: Coverage={coverage_ema:.3f}/{self.coverage_threshold}, Diagonal={diagonal_ema:.3f}/{self.diagonal_threshold}, Stable checks: {self.stability_counter}/{self.required_stable_checks}"
-    
-    def get_current_method(self):
-        """
-        Trả về phương pháp alignment hiện tại.
-        """
-        return self.current_method
     
     def transition_to_phase2(self):
         """
-        Chuyển từ Phase 1 sang Phase 2.
+        Transition from Phase 1 to Phase 2.
         """
         self.phase = 2
-        self.current_method = "progressive"  # Chuyển sang progressive ngay lập tức
-        return f"Transitioned to Phase 2 with Progressive alignment method"
+        self.current_method = "window"  # Keep using window
+        return f"Transitioned to Phase 2 with Window alignment method"
+    
+    def should_switch_to_viterbi(self, current_epoch):
+        """
+        Check if we should switch to Viterbi based on current epoch.
+        """
+        if self.phase != 2 or self.current_method == "viterbi":
+            return False, "Not in Phase 2 or already using Viterbi"
+        
+        if current_epoch >= self.viterbi_start_epoch:
+            return True, f"Reached epoch {current_epoch} (threshold: {self.viterbi_start_epoch})"
+        
+        return False, f"Current epoch {current_epoch} hasn't reached threshold {self.viterbi_start_epoch}"
     
     def switch_to_viterbi(self):
         """
-        Chuyển từ Progressive sang Viterbi.
+        Switch from Window to Viterbi.
         """
         self.current_method = "viterbi"
         return f"Switched to Viterbi alignment method"
     
-    def calculate_duration_weight(self, steps_in_phase2):
+    def calculate_duration_weight(self, steps_in_phase2, current_epoch=None):
         """
-        Tính toán duration weight theo cosine decay.
-        
-        Args:
-            steps_in_phase2: Số bước đã thực hiện trong Phase 2
-            
-        Returns:
-            weight: Duration loss weight hiện tại
+        Calculate duration weight using cosine decay.
         """
         if self.phase == 1:
             return self.initial_dur_weight
         
-        # Giới hạn số bước decay
+        # Limit decay steps
         steps = min(steps_in_phase2, self.max_decay_steps)
         
-        # Cosine decay từ initial đến target
+        # Cosine decay from initial to target
         cosine_decay = 0.5 * (1 + math.cos(math.pi * steps / self.max_decay_steps))
         weight = self.target_dur_weight + (self.initial_dur_weight - self.target_dur_weight) * cosine_decay
         
         return weight
 
+
 def get_alignment_method(manager, global_update, duration_focus_updates=12000, 
-                         coverage=None, diagonal=None, phase2_start_update=None):
+                         phase2_start_update=None, current_epoch=None):
     """
-    Quyết định phương pháp alignment dựa trên tiến trình huấn luyện.
-    
-    Args:
-        manager: AlignmentMethodManager instance
-        global_update: Số bước huấn luyện hiện tại
-        duration_focus_updates: Ngưỡng bước tối đa cho Phase 1
-        coverage: Coverage score (nếu có)
-        diagonal: Diagonal score (nếu có)
-        phase2_start_update: Bước bắt đầu Phase 2 (nếu đã trong Phase 2)
-        
-    Returns:
-        method: String - phương pháp alignment ("window", "progressive", "viterbi")
-        logs: Dict - thông tin logging
+    Determine alignment method based on training phase and epoch.
     """
     logs = {
         'phase': manager.phase,
         'method': manager.current_method,
-        'coverage': coverage,
-        'diagonal': diagonal
     }
     
-    # Xử lý chuyển Phase 1 -> Phase 2
+    # Phase 1 -> Phase 2 transition
     if manager.phase == 1:
         should_transition, reason = manager.should_transition_to_phase2(global_update, duration_focus_updates)
         if should_transition:
@@ -587,23 +453,21 @@ def get_alignment_method(manager, global_update, duration_focus_updates=12000,
             logs['phase_transition'] = True
             logs['transition_reason'] = reason
     
-    # Xử lý chuyển Progressive -> Viterbi trong Phase 2
-    if manager.phase == 2 and coverage is not None and diagonal is not None:
-        should_switch, reason = manager.should_switch_to_viterbi(coverage, diagonal)
+    # Epoch-based Viterbi transition
+    if manager.phase == 2 and current_epoch is not None:
+        should_switch, reason = manager.should_switch_to_viterbi(current_epoch)
         if should_switch:
             manager.switch_to_viterbi()
             logs['method_switch'] = True
             logs['switch_reason'] = reason
     
-    # Tính duration weight nếu đang ở Phase 2
+    # Calculate duration weight
     if manager.phase == 2 and phase2_start_update is not None:
         steps_in_phase2 = global_update - phase2_start_update
-        duration_weight = manager.calculate_duration_weight(steps_in_phase2)
+        duration_weight = manager.calculate_duration_weight(steps_in_phase2, current_epoch=current_epoch)
         logs['duration_weight'] = duration_weight
     else:
         logs['duration_weight'] = manager.initial_dur_weight
     
-    return manager.get_current_method(), logs
-
-
+    return manager.current_method, logs
     

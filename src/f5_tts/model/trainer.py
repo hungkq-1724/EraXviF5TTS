@@ -122,12 +122,13 @@ class Trainer:
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
         duration_loss_weight: float = 0.1,
-        duration_focus_updates: int = 8000,
+        duration_focus_updates: int = 12000,
         duration_focus_weight: float = 1.5,
         ref_texts=None,  # List of reference texts for consistent sample generation
         ref_audio_paths=None,  # List of paths to reference audio files
         ref_sample_text_prompts=None,  # Text prompts to use for the reference samples
     ):
+        
         # First initialize core attributes
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     
@@ -389,6 +390,9 @@ class Trainer:
                 print(f"Error loading reference audio files: {e}")
                 import traceback
                 traceback.print_exc()  # Print the full traceback for better debugging
+
+        self.stored_mel_lengths = None
+        self.stored_text_lengths = None           
 
     def generate_reference_samples(self, global_update, vocoder, nfe_step, cfg_strength, sway_sampling_coef):
         """Generate samples based on reference audio but with new prompt text."""
@@ -822,7 +826,7 @@ class Trainer:
         self.accelerator.print("Checkpoint loading process finished.")
         return start_update
         
-    def calculate_duration_loss(self, text_inputs, mel_spec, mel_lengths, text_lengths, phoneme_sequences, batch_indices, global_update):
+    def calculate_duration_loss(self, text_inputs, mel_spec, mel_lengths, text_lengths, phoneme_sequences, batch_indices, global_update, current_epoch):
         """
         Calculate duration loss using monotonic alignment search instead of uniform distribution.
         This produces more realistic phoneme-level durations.
@@ -881,21 +885,18 @@ class Trainer:
                 phoneme_tensor[i, :L] = torch.tensor(seq, device=mel_spec.device)
                 phoneme_mask[i, :L] = True
             
-            # Calculate current alignment metrics if available from previous iteration
-            coverage = None
-            diagonal = None
-            if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
-                coverage = alignment_utils.calculate_coverage(self.previous_alignment)
-                diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
-            
+            # Store the phoneme mask and text lengths for later metric calculations
+            self.phoneme_mask = phoneme_mask
+            self.stored_mel_lengths = mel_lengths
+            self.stored_text_lengths = phoneme_mask.sum(dim=1)  # Actual phoneme counts
+                        
             # Get appropriate alignment method
             alignment_method, logs = alignment_utils.get_alignment_method(
                 self.alignment_manager,
                 global_update,
                 duration_focus_updates=self.duration_focus_updates,
-                coverage=coverage,
-                diagonal=diagonal,
-                phase2_start_update=self.phase2_start_update
+                phase2_start_update=self.phase2_start_update,
+                current_epoch=current_epoch  # Pass the current epoch
             )
             
             # Check for phase transition
@@ -916,7 +917,7 @@ class Trainer:
                 
                 print(f"\n===== PHASE TRANSITION at update {global_update} =====")
                 print(f"Reason: {logs.get('transition_reason', 'Unknown')}")
-                print(f"Switching to Phase 2 - Full Model Training with Progressive Alignment")
+                print(f"Switching to Phase 2 - Full Model Training with Window Alignment")
                 print(f"Duration loss weight: {self.active_duration_loss_weight}")
                 print(f"====================================================\n")
                 
@@ -1076,7 +1077,7 @@ class Trainer:
             dur_mae = torch.tensor(1.0, device=mel_spec.device)
             
             return dur_loss, dur_mae, None
-        
+            
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         """
         Train the model with phoneme-based duration prediction using monotonic alignment.
@@ -1168,6 +1169,12 @@ class Trainer:
         else:
             raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
     
+        # Calculate steps per epoch and set in alignment manager
+        steps_per_epoch = len(train_dataloader) // self.grad_accumulation_steps
+        if hasattr(self, 'alignment_manager') and self.alignment_manager is not None:
+            self.alignment_manager.set_steps_per_epoch(steps_per_epoch)
+            print(f"Set duration weight decay over {self.alignment_manager.decay_epochs} epochs ({steps_per_epoch * self.alignment_manager.decay_epochs} steps)")
+    
         # Setup learning rate scheduling
         warmup_updates = (
             self.num_warmup_updates * self.accelerator.num_processes
@@ -1229,7 +1236,16 @@ class Trainer:
                     text_lengths = batch.get("text_lengths")
                     batch_indices = batch.get("index", None)
                     batch_phonemes = batch.get("phonemes", None)
-    
+
+                    # Store current lengths for metrics
+                    self.stored_mel_lengths = mel_lengths
+                    if text_lengths is not None:
+                        self.stored_text_lengths = text_lengths
+                    elif hasattr(self, 'phoneme_mask') and self.phoneme_mask is not None:
+                        self.stored_text_lengths = self.phoneme_mask.sum(dim=1)
+                    else:
+                        self.stored_text_lengths = None
+                        
                     # Forward pass through the main model
                     loss, cond, pred = self.model(
                         mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
@@ -1240,7 +1256,7 @@ class Trainer:
                     if self.duration_predictor is not None and text_lengths is not None:
                         dur_loss, dur_mae, alignment_viz = self.calculate_duration_loss(
                             text_inputs, mel_spec, mel_lengths, text_lengths, 
-                            batch_phonemes, batch_indices, global_update
+                            batch_phonemes, batch_indices, global_update, epoch  # Add epoch here
                         )
                         
                         # Add weighted duration loss to main loss
@@ -1319,10 +1335,10 @@ class Trainer:
                     
                     # Add alignment metrics to logging if available
                     if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
-                        coverage = alignment_utils.calculate_coverage(self.previous_alignment)
-                        diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
-                        log_dict["coverage_score"] = coverage
-                        log_dict["diagonal_score"] = diagonal
+
+                        batch_mel_lengths = mel_lengths  # From current batch
+                        batch_text_lengths = text_lengths if torch.is_tensor(text_lengths) else phoneme_mask.sum(dim=1)
+                        
                         if hasattr(self.alignment_manager, 'current_method'):
                             log_dict["alignment_method"] = self.alignment_manager.current_method
                     
@@ -1339,10 +1355,6 @@ class Trainer:
                         
                         # Add alignment metrics to TensorBoard if available
                         if hasattr(self, 'previous_alignment') and self.previous_alignment is not None:
-                            coverage = alignment_utils.calculate_coverage(self.previous_alignment)
-                            diagonal = alignment_utils.calculate_diagonal_score(self.previous_alignment)
-                            self.writer.add_scalar("coverage_score", coverage, global_update)
-                            self.writer.add_scalar("diagonal_score", diagonal, global_update)
                             if hasattr(self.alignment_manager, 'current_method'):
                                 self.writer.add_text("alignment_method", self.alignment_manager.current_method, global_update)
                         
