@@ -65,6 +65,10 @@ def parse_args():
     parser.add_argument("--dataset_name", type=str, default="Emilia_ZH_EN", help="Name of the dataset to use")
     parser.add_argument("--output_dir", type=str, default=None, help="Directory to save distillation checkpoints. Defaults to ckpts/{dataset_name}_distill_{student_exp_name}")
     parser.add_argument("--distill_loss_weight", type=float, default=0.5, help="Weight (alpha) for the distillation loss.")
+    parser.add_argument(
+            "--spec_l1_weight", type=float, default=0.0,
+            help="Weight (β) for an additional L1 loss on the final mel outputs (for sharper transients)."
+        )
     parser.add_argument("--distill_loss_type", type=str, default="mse", choices=["mse", "l1"], help="Type of loss for comparing teacher/student flow predictions.")
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for STUDENT training")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for STUDENT optimizer")
@@ -739,7 +743,10 @@ def main():
         source_ckpt_basename = os.path.basename(args.student_init_ckpt_path)
         target_basename = "pretrained_" + source_ckpt_basename if not source_ckpt_basename.startswith("pretrained_") else source_ckpt_basename
         copied_checkpoint_path = os.path.join(args.output_dir, target_basename)
-        
+        if not os.path.isfile(copied_checkpoint_path):
+            shutil.copy(args.student_init_ckpt_path, copied_checkpoint_path)
+
+        '''
         # Check if the file exists and verify it's valid
         if os.path.isfile(copied_checkpoint_path):
             try:
@@ -786,7 +793,7 @@ def main():
             except Exception as e:
                 accelerator.print(f"Warning: Error copying checkpoint: {e}. Using original path.")
                 initial_student_ckpt_path_for_loading = args.student_init_ckpt_path
-                
+    '''
     # --- Load Initial Student State (if provided, into raw model on CPU) ---
     if (not args.from_scratch) and initial_student_ckpt_path_for_loading:
         accelerator.print(f"Loading initial Student state from: {initial_student_ckpt_path_for_loading} (before prepare)")
@@ -1063,15 +1070,31 @@ def main():
                     student_loss_full = F.mse_loss(student_pred_flow, target_flow, reduction="none")
                     masked_student_loss = student_loss_full * rand_span_mask.unsqueeze(-1)
                     student_loss = masked_student_loss.sum() / rand_span_mask.sum().clamp(min=1)
-                    if args.distill_loss_type == "mse": distill_loss_full = F.mse_loss(student_pred_flow, teacher_pred_flow.detach(), reduction="none")
-                    elif args.distill_loss_type == "l1": distill_loss_full = F.l1_loss(student_pred_flow, teacher_pred_flow.detach(), reduction="none")
-                    else: raise ValueError(f"Unsupported distill_loss_type: {args.distill_loss_type}")
+                    
+                    if args.distill_loss_type == "mse": 
+                        distill_loss_full = F.mse_loss(student_pred_flow, teacher_pred_flow.detach(), reduction="none")
+                    elif args.distill_loss_type == "l1": 
+                        distill_loss_full = F.l1_loss(student_pred_flow, teacher_pred_flow.detach(), reduction="none")
+                    else: 
+                        raise ValueError(f"Unsupported distill_loss_type: {args.distill_loss_type}")
+
+                    if args.spec_l1_weight > 0.0:
+                        if args.spec_l1_weight > 0.0:
+                            spec_l1_full = F.l1_loss(student_pred_flow,
+                                                     teacher_pred_flow.detach(),
+                                                     reduction="none")
+                            masked_spec = spec_l1_full * rand_span_mask.unsqueeze(-1)
+                            spec_l1 = masked_spec.sum() / rand_span_mask.sum().clamp(min=1)
+                        else:
+                            # zero scalar tensor on the correct device
+                            spec_l1 = torch.tensor(0.0, device=student_pred_flow.device)
+                        
                     masked_distill_loss = distill_loss_full * rand_span_mask.unsqueeze(-1)
                     distill_loss = masked_distill_loss.sum() / rand_span_mask.sum().clamp(min=1)
                     alpha = args.distill_loss_weight; 
 
                     # Calc loss with duration predictor loss
-                    total_loss = (1.0 - alpha) * student_loss + alpha * distill_loss
+                    total_loss = (1.0 - alpha) * student_loss + alpha * distill_loss + spec_l1 * args.spec_l1_weight
                     
                     # In the loss calculation section:
                     if args.use_duration_predictor and hasattr(unwrapped_student_model, 'duration_predictor') and unwrapped_student_model.duration_predictor is not None and 'attn' in batch:
