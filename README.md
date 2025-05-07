@@ -4,8 +4,6 @@
 
 # UPDATE: 
 
-## Updated May 3, 2025: Complete overhaul of training methodology with phoneme-based duration prediction for superior speech quality
-
 ## Streaming
 ```
 # pip install fastapi uvicorn piper-tts langchain underthesea vinorm
