@@ -220,19 +220,7 @@ class F5TTSWrapper:
             # Add a flag to check which embedding to use
             self.model.duration_predictor.using_phonemes = False
         
-        def _load_checkpoint(self, model, ckpt_path, dtype=None, use_ema=True):
-        """
-        Load model checkpoint with proper handling of different checkpoint formats.
-        
-        Args:
-            model: The model to load weights into
-            ckpt_path: Path to the checkpoint file
-            dtype: Data type for model weights
-            use_ema: Whether to use EMA weights from the checkpoint
-        
-        Returns:
-            Loaded model
-        """
+    def _load_checkpoint(self, model, ckpt_path, dtype=None, use_ema=True):
         if dtype is None:
             dtype = (
                 torch.float16
